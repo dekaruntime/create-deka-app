@@ -15,7 +15,7 @@ jobs:
     environment: release
     permissions:
       contents: read
-      id-token: write # npm provenance
+      id-token: write # OIDC: trusted publishing + provenance
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +23,14 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1; setup-node's Node 22 ships an
+      # older npm. No secret is involved: npm exchanges this workflow's OIDC
+      # identity for a short-lived credential.
+      - name: Use an npm that understands trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Tag matches package version
         run: |
@@ -36,10 +44,11 @@ jobs:
       - name: Smoke test the CLI
         run: node index.js
 
+      # Authenticated by npm trusted publishing (OIDC) on the workflow name,
+      # with no stored credential. Provenance is generated automatically for a
+      # public package from a public repo, so no extra flag is passed.
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+        run: npm publish --access public
 
       - name: Read it back from the registry
         run: |
