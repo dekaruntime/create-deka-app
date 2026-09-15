@@ -17,7 +17,7 @@ bun create deka-app myapp
 
 ## Status
 
-**Placeholder.** This package reserves the name while the real scaffolder is built ([deka#1091](https://github.com/dekaruntime/deka/issues/1091)). Today it prints where to get deka.
+**Placeholder.** This package reserves the name while the real scaffolder is built ([deka#1091](https://github.com/dekaruntime/deka/issues/1091)). It does not scaffold a project yet; it points you at deka.
 
 Install deka directly in the meantime:
 
