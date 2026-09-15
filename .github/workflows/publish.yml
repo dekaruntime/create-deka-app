@@ -1,0 +1,56 @@
+# Publishes create-deka-app to npm on v* tags.
+#
+# No compilation happens here: this package is plain JS. The binary packages it
+# will depend on are built by dekaruntime/deka's release and only copied, never
+# rebuilt (deka#1091).
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}."
+            exit 1
+          fi
+
+      - name: Smoke test the CLI
+        run: node index.js
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Read it back from the registry
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 10); do
+            PUBLISHED="$(npm view create-deka-app@"$VERSION" version 2>/dev/null || true)"
+            if [ "$PUBLISHED" = "$VERSION" ]; then
+              echo "create-deka-app@$VERSION is live on npm"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::create-deka-app@$VERSION did not appear on the registry"
+          exit 1

@@ -1,0 +1,14 @@
+{
+  "name": "create-deka-app",
+  "version": "0.0.1",
+  "description": "Scaffold a new deka app",
+  "bin": { "create-deka-app": "./index.js" },
+  "type": "module",
+  "files": ["index.js", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "repository": { "type": "git", "url": "git+https://github.com/dekaruntime/create-deka-app.git" },
+  "homepage": "https://deka.gg",
+  "bugs": "https://github.com/dekaruntime/deka/issues",
+  "license": "Apache-2.0",
+  "keywords": ["deka", "dekascript", "runtime", "react", "scaffold", "create-deka-app"]
+}
