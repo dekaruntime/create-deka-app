@@ -378,6 +378,60 @@ jobs:
           git diff --stat -- npm/ package.json || true
 
       # ------------------------------------------------------------------
+      # 5b. Pre-flight EVERY package before the FIRST publish. npm has no
+      #     multi-package transaction and the OIDC credential cannot
+      #     unpublish, so all-or-nothing has to be won here: anything that
+      #     can be checked without writing to the registry is checked for
+      #     the whole set, and one failure means zero packages published.
+      #     Per package: version stamped to VERSION, no placeholder version
+      #     left in any dependency, the tarball packs (same validation as
+      #     publish, offline), and a platform package's tarball actually
+      #     contains its binaries.
+      # ------------------------------------------------------------------
+      - name: Pre-flight every package before the first publish
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DIRS="npm/${FAMILY}-darwin-arm64 npm/${FAMILY}-darwin-x64 npm/${FAMILY}-linux-x64 npm/${FAMILY}"
+          if [ "$FAMILY" = "deka" ]; then
+            DIRS="$DIRS ."
+          fi
+          for d in $DIRS; do
+            NAME="$(jq -r .name "$d/package.json")"
+            STAMPED="$(jq -r .version "$d/package.json")"
+            if [ "$STAMPED" != "$VERSION" ]; then
+              echo "::error::$NAME is stamped $STAMPED, expected $VERSION"
+              exit 1
+            fi
+            PLACEHOLDERS="$(jq -r '[(.dependencies // {}), (.optionalDependencies // {})] | add | to_entries[] | select(.value | test("^0\\.0\\.0")) | .key' "$d/package.json")"
+            if [ -n "$PLACEHOLDERS" ]; then
+              echo "::error::$NAME still pins a placeholder version for: $PLACEHOLDERS"
+              exit 1
+            fi
+            # npm 11 prints a JSON array, npm 12 an object keyed by package name.
+            FILES="$(cd "$d" && npm pack --dry-run --json 2>/dev/null | jq -r 'if type == "array" then .[0] else (to_entries[0].value) end | .files[].path')"
+            if [ -z "$FILES" ]; then
+              echo "::error::$NAME: npm pack produced no file list"
+              exit 1
+            fi
+            case "$d" in
+              npm/${FAMILY}-*)
+                for bin in bin/deka bin/dsc; do
+                  if [ "$FAMILY" = "dsc" ] && [ "$bin" = "bin/deka" ]; then continue; fi
+                  if ! printf '%s\n' "$FILES" | grep -qx "$bin"; then
+                    echo "::error::$NAME tarball is missing $bin"
+                    exit 1
+                  fi
+                done
+                ;;
+            esac
+            echo "pre-flight ok: $NAME@$VERSION ($(printf '%s\n' "$FILES" | wc -l | tr -d ' ') files)"
+          done
+
+      # ------------------------------------------------------------------
       # 6. Publish: platform packages first, launcher last. Trusted
       #    publishing (OIDC) -- no NPM_TOKEN, no ~/.npmrc, no --provenance
       #    flag (provenance is automatic for a public package from a
