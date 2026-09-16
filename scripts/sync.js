@@ -9,7 +9,7 @@
 //   node scripts/sync.js --family dsc  --version 0.53.4
 import path from 'node:path'
 import fs from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveManifest, PLATFORMS } from './lib/manifest.js'
 import { downloadAndVerify } from './lib/verify.js'
@@ -39,7 +39,14 @@ export function parseArgs(argv) {
 }
 
 export function smokeTestVersion(binaryPath, expectedVersion) {
-  const output = execFileSync(binaryPath, ['--version'], { encoding: 'utf8' })
+  // deka and dsc print their version banner on stderr, not stdout, and exit 0.
+  // Reading stdout alone yields an empty string and rejects a good binary.
+  const result = spawnSync(binaryPath, ['--version'], { encoding: 'utf8' })
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`${binaryPath} --version exited ${result.status}`)
+  }
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
   if (!output.includes(expectedVersion)) {
     throw new Error(`${binaryPath} --version did not mention ${expectedVersion}: ${output.trim()}`)
   }
