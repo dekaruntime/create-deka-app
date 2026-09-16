@@ -30,38 +30,51 @@ function tmp(prefix) {
   return mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
-// Resolved version returned by the stubbed `npm view` below, standing in
-// for whatever is actually latest on the real registry. Deliberately
-// different from both create-deka-app's own version and from a plausible
-// runtime version, so a test that mixes them up fails loudly.
-const STUB_RUNTIME_VERSION = '9.9.9'
+// Resolved version returned by the stubbed `npm view` fallback lookup,
+// standing in for whatever is actually latest on the real registry.
+// Deliberately different from create-deka-app's own version, so a test
+// that mixes up the happy-path pin and the fallback pin fails loudly.
+const STUB_FALLBACK_VERSION = '9.9.9'
 
 // Writes a fake `npm` onto PATH that mimics just enough of npm to drive the
-// real CLI end to end:
-//  - `npm view @dekaruntime/deka version` (the registry lookup) prints
-//    STUB_RUNTIME_VERSION and logs that it ran.
-//  - `npm install` records that it ran (and whether package.json already
-//    existed, to prove write-before-install ordering), then materializes
-//    node_modules/.bin/deka as a second stub standing in for the real
-//    platform binary that a genuine install would have fetched.
+// real CLI end to end. `installBehavior` is either:
+//  - 'succeed': every `npm install` succeeds (the lockstep happy path --
+//    the exact @dekaruntime/deka pin "exists").
+//  - 'fail-exact-pin': `npm install` fails while package.json pins
+//    OWN_VERSION (simulating the runtime build not published yet) and
+//    succeeds once it pins anything else, so the fallback path is
+//    exercised for real through the CLI, not just unit-tested.
+// `npm view` (the fallback registry lookup) always prints
+// STUB_FALLBACK_VERSION and logs that it ran, so a test can assert it was
+// (or was not) called.
 //
 // The deka stub is invoked as `deka init <dirName>` from the *parent*
 // directory (create-deka-app's new invocation shape) and, like the real
 // binary, creates its files inside `$2` and prints a `[init] ...` block
 // ending in a bare `deka serve` suggestion -- the exact suggestion
 // create-deka-app must suppress and replace.
-function writeStubNpm(binDir, logFile) {
+function writeStubNpm(binDir, logFile, { installBehavior = 'succeed', ownVersion } = {}) {
   const npmPath = path.join(binDir, 'npm')
+  const installFailureClause =
+    installBehavior === 'fail-exact-pin'
+      ? `PINNED="$(node -e "console.log(require('./package.json').devDependencies['@dekaruntime/deka'])")"
+if [ "$PINNED" = "${ownVersion}" ]; then
+  echo "npm install|pinned=$PINNED|FAILED|$(pwd)" >> "${logFile}"
+  echo "npm ERR! code ETARGET" >&2
+  exit 1
+fi
+`
+      : ''
   writeFileSync(
     npmPath,
     `#!/bin/sh
 set -e
 if [ "$1" = "view" ]; then
   echo "npm view $2 $3|$(pwd)" >> "${logFile}"
-  echo "${STUB_RUNTIME_VERSION}"
+  echo "${STUB_FALLBACK_VERSION}"
   exit 0
 fi
-SAW_PKG_JSON=no
+${installFailureClause}SAW_PKG_JSON=no
 if [ -f package.json ]; then SAW_PKG_JSON=yes; fi
 echo "npm install|saw-package-json=$SAW_PKG_JSON|$(pwd)" >> "${logFile}"
 mkdir -p node_modules/.bin
@@ -85,7 +98,7 @@ exit 0
   chmodSync(npmPath, 0o755)
 }
 
-test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in order', () => {
+test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in order (lockstep happy path)', () => {
   const work = tmp('cda-e2e-')
   const binDir = path.join(work, 'bin')
   mkdirSync(binDir)
@@ -118,13 +131,8 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
   assert.deepEqual(pkg.scripts, { dev: 'deka dev', build: 'deka build', start: 'deka start' })
   assert.equal(
     pkg.devDependencies['@dekaruntime/deka'],
-    STUB_RUNTIME_VERSION,
-    'must pin the @dekaruntime/deka version resolved from the registry (npm view)'
-  )
-  assert.notEqual(
-    pkg.devDependencies['@dekaruntime/deka'],
     ownVersion,
-    "must NOT pin create-deka-app's own version -- the two release lines are not in lockstep"
+    "lockstep versioning: must pin exactly create-deka-app's own version when it installs cleanly"
   )
 
   // Proof that step 4 (deka init) actually ran, not just that install did.
@@ -136,20 +144,15 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
   const log = readFileSync(logFile, 'utf8').trim().split('\n')
   assert.equal(
     log.length,
-    3,
-    `expected exactly [npm view, npm install, deka init], got:\n${log.join('\n')}`
+    2,
+    `lockstep versioning makes no registry call on the happy path -- expected exactly [npm install, deka init], got:\n${log.join('\n')}`
   )
-  assert.match(
-    log[0],
-    /^npm view @dekaruntime\/deka version\|/,
-    'the runtime version must be resolved from the registry before package.json is written'
-  )
-  assert.match(log[1], /^npm install\|saw-package-json=yes\|/, 'package.json must be written before install runs')
+  assert.match(log[0], /^npm install\|saw-package-json=yes\|/, 'package.json must be written before install runs')
   // macOS resolves /var -> /private/var, so the child reports a realpath'd cwd
   // while `work` is the unresolved mkdtemp path. Compare both realpath'd, or
   // this fails on every macOS run and passes only on Linux CI (it did: 0.0.5
   // shipped with this red).
-  const [initCmd, initCwd] = log[2].split('|')
+  const [initCmd, initCwd] = log[1].split('|')
   assert.equal(
     initCmd,
     'deka init myapp',
@@ -179,6 +182,54 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
     output,
     /^\s*deka serve\s*$/m,
     "deka init's own bare-command suggestion must be suppressed, not printed alongside create-deka-app's own"
+  )
+
+  rmSync(work, { recursive: true, force: true })
+})
+
+test('end-to-end: falls back to the registry-resolved version when the exact pin fails to install', () => {
+  const work = tmp('cda-e2e-fallback-')
+  const binDir = path.join(work, 'bin')
+  mkdirSync(binDir)
+  const logFile = path.join(work, 'log.txt')
+  writeFileSync(logFile, '')
+
+  const ownVersion = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version
+  writeStubNpm(binDir, logFile, { installBehavior: 'fail-exact-pin', ownVersion })
+
+  const env = {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH}`,
+    npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 darwin arm64 workspaces/false',
+  }
+
+  const output = execFileSync(process.execPath, [cliPath, 'myapp'], {
+    cwd: work,
+    env,
+    encoding: 'utf8',
+  })
+
+  assert.match(output, /Falling back to the latest published version/i)
+
+  const pkg = JSON.parse(readFileSync(path.join(work, 'myapp', 'package.json'), 'utf8'))
+  assert.equal(
+    pkg.devDependencies['@dekaruntime/deka'],
+    STUB_FALLBACK_VERSION,
+    'must end up pinning the registry-resolved fallback version, not the unpublished exact pin'
+  )
+
+  const log = readFileSync(logFile, 'utf8').trim().split('\n')
+  assert.ok(
+    log.some((line) => line.startsWith('npm install') && line.includes(`pinned=${ownVersion}`) && line.includes('FAILED')),
+    `expected a failed install attempt pinning ${ownVersion}; got:\n${log.join('\n')}`
+  )
+  assert.ok(
+    log.some((line) => line.startsWith(`npm view @dekaruntime/deka version|`)),
+    `expected the fallback registry lookup to have run; got:\n${log.join('\n')}`
+  )
+  assert.ok(
+    log.some((line) => line.startsWith('npm install') && line.includes('saw-package-json=yes') && !line.includes('FAILED')),
+    `expected a second, successful install attempt; got:\n${log.join('\n')}`
   )
 
   rmSync(work, { recursive: true, force: true })
