@@ -1,9 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn as spawnChild } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import path from 'node:path'
 import { detectPackageManager } from './package-manager.js'
 import { isSupportedPlatform, platformKey } from './platform.js'
 import { versionChannel, distTagFor } from './channel.js'
+import { createInitOutputFilter } from './init-output-filter.js'
+import { BANNER } from './banner.js'
 
 // Thrown for every expected failure. `message` is written straight to
 // stderr, so it always says what happened and what to do about it.
@@ -30,39 +33,77 @@ function dekaBinPath(targetDir, platform) {
   return path.join(targetDir, 'node_modules', '.bin', platform === 'win32' ? 'deka.cmd' : 'deka')
 }
 
-// `deka init`'s own "next steps" block always starts with a line beginning
-// "[init]" (verified against the real binary: `[init] DekaScript app
-// ready` followed by 1-2 indented command lines). Everything from that
-// line onward is deka's suggestion for what to run next, and we always
-// replace it with our own -- see printNextSteps below for why. Everything
-// before it (the banner, the per-file `[create] ...` lines) is left
-// intact so the user still sees the scaffold happen.
-function stripDekaNextSteps(output) {
-  if (!output) return ''
-  const lines = String(output).split(/\r?\n/)
-  const cutIndex = lines.findIndex((line) => line.startsWith('[init]'))
-  return cutIndex === -1 ? String(output) : lines.slice(0, cutIndex).join('\n')
+// `deka dev` is only runnable as a bare command when `deka` is on PATH --
+// true for a global/curl install, never true here: this package always
+// installs @dekaruntime/deka as a project devDependency, so the only copy
+// of `deka` that exists is node_modules/.bin/deka (deka#1103 -- the actual
+// bug: deka init's own "Next steps" told people to run `deka dev` and it
+// printed `command not found`). Each package manager has its own idiom for
+// running a devDependency's binary via its `dev` script, plus a direct
+// form that reaches node_modules/.bin without needing a script at all --
+// both are shown so the user isn't stuck if package.json's `dev` script
+// ever changes.
+const DEV_STEP_BY_PM = {
+  npm: { run: 'npm run dev', direct: 'npx deka dev' },
+  pnpm: { run: 'pnpm dev', direct: 'pnpm exec deka dev' },
+  yarn: { run: 'yarn dev', direct: 'yarn deka dev' },
+  bun: { run: 'bun dev', direct: 'bunx deka dev' },
 }
 
-// deka init's own next-steps text always tells the user to run `deka dev`,
-// and that command is correct as-is -- `deka` from this package is scoped
-// to the project, so the copy installed into node_modules/.bin (and picked
-// up via the project's package.json script) works with nothing beyond what
-// the install step above already put on disk. We suppress deka's block
-// (stripDekaNextSteps) only because it doesn't know it's being invoked
-// from the parent directory here, so it can't tell the user they still
-// need to `cd <dirName>` first -- not because its command is wrong. Our
-// own block adds that missing `cd` and repeats `deka dev` verbatim,
-// regardless of which package manager ran the install. (This reverts an
-// earlier version of this function that substituted a package-manager
-// idiom -- `npm run dev` / `pnpm dev` / etc. -- for `deka dev`, on the
-// mistaken premise that a bare `deka dev` can't be run without a global
-// install.)
-function printNextSteps(log, dirName) {
+// Prints create-deka-app's own "Next steps", replacing deka init's (which
+// is suppressed -- see createInitOutputFilter) because deka init's version
+// (a) doesn't know it's being invoked from the parent directory, so it
+// can't tell the user they still need to `cd <dirName>` first, and (b)
+// always suggests a bare `deka dev`, which is wrong here (see above).
+function printNextSteps(log, dirName, pm) {
+  const step = DEV_STEP_BY_PM[pm.name] || DEV_STEP_BY_PM.npm
   log('')
   log('  Next steps:')
   log(`    cd ${dirName}`)
-  log('    deka dev')
+  log(`    ${step.run}        # or: ${step.direct}`)
+}
+
+// Runs `deka init`, streaming its (filtered) output to `log` line by line
+// as the child prints it -- not buffered and replayed after the process
+// exits -- so the per-file `[create] ...` lines appear as the scaffold
+// actually happens. `createInitOutputFilter` (src/init-output-filter.js)
+// strips deka's own banner (create-deka-app already printed its own, once,
+// before the install step -- see createApp below) and deka's own "Next
+// steps" block (see printNextSteps above for why) out of that stream;
+// everything else passes through unchanged.
+//
+// Streams STDERR, not stdout -- verified against the real binary (run it
+// with each redirected separately): the banner, every `[create] ...` /
+// `[init] ...` line and "Next steps" all go to stderr; stdout is empty on
+// a normal run. deka init's stdout is buffered instead, purely so it can
+// still be shown (unfiltered) if it ever turns out to matter on a failure.
+//
+// Passed into createApp as `runDekaInit` (defaulting to this real
+// implementation) purely so tests can substitute a fake without spawning a
+// real process -- see makeRunDekaInitStub in test/scaffold-unit.test.js,
+// which drives this exact same createInitOutputFilter so tests exercise
+// the real filtering logic instead of a reimplementation of it.
+export function runDekaInitStreaming(dekaBin, args, { cwd, log }) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawnChild(dekaBin, args, { cwd, stdio: ['inherit', 'pipe', 'pipe'] })
+    } catch (error) {
+      resolve({ status: null, error })
+      return
+    }
+
+    let stdout = ''
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
+
+    const filtered = child.stderr.pipe(createInitOutputFilter())
+    createInterface({ input: filtered, crlfDelay: Infinity }).on('line', log)
+
+    child.on('error', (error) => resolve({ status: null, error, stdout }))
+    child.on('close', (status) => resolve({ status, stdout }))
+  })
 }
 
 export const RUNTIME_PACKAGE = '@dekaruntime/deka'
@@ -162,14 +203,19 @@ export function resolveRuntimeVersion({ ownVersion }) {
  *
  * Returns 0 on success. Throws ScaffoldError (carrying an exitCode) for
  * every expected failure; anything else is a bug and propagates.
+ *
+ * Async only because the final step (running `deka init`) streams its
+ * output as it happens rather than buffering it -- see runDekaInitStreaming.
+ * Everything before that step is still plain synchronous code.
  */
-export function createApp({
+export async function createApp({
   targetArg,
   cwd = process.cwd(),
   env = process.env,
   platform = process.platform,
   arch = process.arch,
   spawn = spawnSync,
+  runDekaInit = runDekaInitStreaming,
   log = console.log,
   ownVersion,
 } = {}) {
@@ -188,6 +234,13 @@ export function createApp({
         'Windows support is tracked at https://github.com/dekaruntime/deka/issues/1092.'
     )
   }
+
+  // Printed once, up front, before anything else -- deka init would print
+  // this exact banner itself (see src/banner.js for where these bytes came
+  // from), so its copy is suppressed (createInitOutputFilter) to keep it
+  // from showing twice.
+  log(BANNER)
+  log('')
 
   const targetDir = path.resolve(cwd, targetArg)
 
@@ -227,7 +280,7 @@ export function createApp({
   writePackageJson(runtimeVersion)
 
   const pm = detectPackageManager(env)
-  log(`> Using ${pm.name} to install @dekaruntime/deka...`)
+  log(`> Installing the deka runtime with ${pm.name}...`)
 
   const [installCmd, installArgs] = pm.install
   const runInstall = () => spawn(installCmd, installArgs, { cwd: targetDir, stdio: 'inherit' })
@@ -294,30 +347,28 @@ export function createApp({
   // reference the right directory name if any of it leaks through.
   const dirName = path.basename(targetDir)
   const parentDir = path.dirname(targetDir)
-  const init = spawn(dekaBin, ['init', dirName], {
-    cwd: parentDir,
-    stdio: ['inherit', 'pipe', 'pipe'],
-    encoding: 'utf8',
-  })
+  // Its stderr (where deka prints everything -- see runDekaInitStreaming)
+  // streams straight to `log`, filtered, as deka prints it. Only stdout
+  // comes back buffered, since it's normally empty and only worth showing
+  // at all on the failure path below.
+  const init = await runDekaInit(dekaBin, ['init', dirName], { cwd: parentDir, log })
 
   if (init.error) {
     throw new ScaffoldError(`Could not run "deka init" in ${targetDir}: ${init.error.message}`)
   }
   if (init.status !== 0) {
-    // Something went wrong -- show everything deka printed, unfiltered,
-    // so the real error is visible. Filtering only ever happens below, on
-    // the success path, where we know exactly what we're throwing away.
+    // Something went wrong. Whatever deka printed to stderr before failing
+    // already reached `log` live, filtered the same as on the success
+    // path; show its stdout too, unfiltered, in the rare case it printed
+    // something there.
     if (init.stdout) log(String(init.stdout))
-    if (init.stderr) log(String(init.stderr))
     throw new ScaffoldError(
       `"deka init" failed in ${targetDir} (exit code ${init.status}).`,
       init.status ?? 1
     )
   }
 
-  if (init.stdout) log(stripDekaNextSteps(init.stdout))
-  if (init.stderr) log(stripDekaNextSteps(init.stderr))
-  printNextSteps(log, dirName)
+  printNextSteps(log, dirName, pm)
 
   return 0
 }

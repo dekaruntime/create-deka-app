@@ -1,9 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { createInterface } from 'node:readline'
 import os from 'node:os'
 import path from 'node:path'
 import { createApp, ScaffoldError, USAGE, resolveRuntimeVersion, resolveLatestRuntimeVersion, RUNTIME_PACKAGE } from '../src/scaffold.js'
+import { createInitOutputFilter } from '../src/init-output-filter.js'
 import { run } from '../src/cli.js'
 
 // The pinned test stand-in for create-deka-app's own version. Lockstep
@@ -21,13 +23,17 @@ function tmp(prefix) {
 // `initOutput` stands in for what the real deka binary prints on init --
 // tests that care about next-steps filtering pass their own to prove
 // stripDekaNextSteps behaves against realistic input.
+// `cmd` is whichever package manager's install command createApp resolved
+// (npm, pnpm, yarn or bun) -- matched on `args[0] === 'install'` rather
+// than a specific `cmd` name, so this stub works for all four the same
+// way the real install step does.
 function makeSpawnStub({ calls = [], initOutput = '' } = {}) {
   return (cmd, args, opts) => {
     calls.push([cmd, args, opts.cwd])
     if (cmd === 'npm' && args[0] === 'view') {
       return { status: 0, stdout: '9.9.9\n' }
     }
-    if (cmd === 'npm' && args[0] === 'install') {
+    if (args[0] === 'install') {
       mkdirSync(path.join(opts.cwd, 'node_modules', '.bin'), { recursive: true })
       writeFileSync(path.join(opts.cwd, 'node_modules', '.bin', 'deka'), '#!/bin/sh\n')
       return { status: 0 }
@@ -39,12 +45,39 @@ function makeSpawnStub({ calls = [], initOutput = '' } = {}) {
   }
 }
 
-// The real deka binary's own next-steps block, captured by actually running
-// `deka init myapp` (v0.53.2) with cwd set to the parent directory and
+// Test double for createApp's `runDekaInit` -- the real implementation
+// (runDekaInitStreaming, in src/scaffold.js) spawns a real process and
+// streams its stdout through createInitOutputFilter to `log` line by
+// line. This drives the exact same filter against canned `initOutput`
+// instead, so unit tests exercise the real filtering logic without
+// spawning anything -- and, sharing `calls` with makeSpawnStub, still
+// produce the same [cmd, args, cwd] shape the existing assertions expect
+// for the deka-init step.
+function makeRunDekaInitStub({ calls = [], initOutput = '' } = {}) {
+  return (dekaBin, args, { cwd, log }) =>
+    new Promise((resolve) => {
+      calls.push([dekaBin, args, cwd])
+      const filter = createInitOutputFilter()
+      const rl = createInterface({ input: filter, crlfDelay: Infinity })
+      rl.on('line', log)
+      // `close` fires only once the input has ended AND every 'line' it
+      // produced has already been emitted -- resolving here (rather than
+      // on the filter's own 'finish') guarantees createApp's next step
+      // (printNextSteps) can't run before all of deka init's lines do.
+      rl.on('close', () => resolve({ status: 0 }))
+      filter.end(initOutput)
+    })
+}
+
+// The real deka binary's own output, captured by actually running
+// `deka init myapp` (v0.53.7) with cwd set to the parent directory and
 // `myapp` as the positional argument -- the exact invocation shape this
-// fix switches to. Used to prove stripDekaNextSteps and create-deka-app's
-// own printed next steps behave against real output, not just an
-// abbreviated stub.
+// fix uses (see PR description for the raw bytes this was copied from,
+// including the banner). Used to prove createInitOutputFilter and
+// create-deka-app's own printed next steps behave against real output,
+// not just an abbreviated stub. Deliberately keeps deka's real shape: a
+// blank line, then "Next steps:", then its indented command lines --
+// that shape is exactly what the filter keys off.
 const REAL_DEKA_INIT_OUTPUT = `[create] myapp/deka.json
 [create] myapp/deka.lock
 [create] myapp/.gitignore
@@ -55,15 +88,17 @@ const REAL_DEKA_INIT_OUTPUT = `[create] myapp/deka.json
 [create] myapp/public/style.css
 [create] myapp/public/404.html
 [init] DekaScript app ready
+
+  Next steps:
   cd myapp
   deka serve
 `
 
-test('no argument: prints usage, exits non-zero, does not touch cwd', () => {
+test('no argument: prints usage, exits non-zero, does not touch cwd', async () => {
   const cwd = tmp('cda-no-arg-')
   const before = readdirSync(cwd)
   let printedError = ''
-  const code = run({
+  const code = await run({
     argv: [],
     cwd,
     env: {},
@@ -78,9 +113,9 @@ test('no argument: prints usage, exits non-zero, does not touch cwd', () => {
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('unsupported platform: rejected before touching the filesystem', () => {
+test('unsupported platform: rejected before touching the filesystem', async () => {
   const cwd = tmp('cda-platform-')
-  assert.throws(
+  await assert.rejects(
     () =>
       createApp({
         targetArg: 'myapp',
@@ -96,13 +131,13 @@ test('unsupported platform: rejected before touching the filesystem', () => {
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('existing non-empty directory is refused with a clear message', () => {
+test('existing non-empty directory is refused with a clear message', async () => {
   const cwd = tmp('cda-nonempty-')
   const target = path.join(cwd, 'myapp')
   mkdirSync(target)
   writeFileSync(path.join(target, 'keep-me.txt'), 'pre-existing file')
 
-  assert.throws(
+  await assert.rejects(
     () =>
       createApp({
         targetArg: 'myapp',
@@ -111,6 +146,7 @@ test('existing non-empty directory is refused with a clear message', () => {
         platform: 'linux',
         arch: 'x64',
         ownVersion: OWN_VERSION,
+        log: () => {},
       }),
     (err) => err instanceof ScaffoldError && /already exists and is not empty/.test(err.message)
   )
@@ -118,9 +154,9 @@ test('existing non-empty directory is refused with a clear message', () => {
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('createApp requires ownVersion (lockstep versioning has no other source of truth for the pin)', () => {
+test('createApp requires ownVersion (lockstep versioning has no other source of truth for the pin)', async () => {
   const cwd = tmp('cda-no-ownversion-')
-  assert.throws(
+  await assert.rejects(
     () =>
       createApp({
         targetArg: 'myapp',
@@ -134,13 +170,13 @@ test('createApp requires ownVersion (lockstep versioning has no other source of 
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('existing empty directory is accepted, and the happy path makes no registry call', () => {
+test('existing empty directory is accepted, and the happy path makes no registry call', async () => {
   const cwd = tmp('cda-empty-')
   const target = path.join(cwd, 'myapp')
   mkdirSync(target)
   const calls = []
 
-  const code = createApp({
+  const code = await createApp({
     targetArg: 'myapp',
     cwd,
     env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
@@ -149,6 +185,7 @@ test('existing empty directory is accepted, and the happy path makes no registry
     ownVersion: OWN_VERSION,
     log: () => {},
     spawn: makeSpawnStub({ calls }),
+    runDekaInit: makeRunDekaInitStub({ calls }),
   })
 
   assert.equal(code, 0)
@@ -173,11 +210,11 @@ test('existing empty directory is accepted, and the happy path makes no registry
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('final output tells the user to cd into the project and gives a runnable dev command', () => {
+test('final output tells the user to cd into the project and gives a runnable, package-manager-correct dev command', async () => {
   const cwd = tmp('cda-nextsteps-')
   const logs = []
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
@@ -185,25 +222,28 @@ test('final output tells the user to cd into the project and gives a runnable de
     arch: 'x64',
     ownVersion: OWN_VERSION,
     log: (msg) => logs.push(msg),
-    spawn: makeSpawnStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+    spawn: makeSpawnStub({}),
+    runDekaInit: makeRunDekaInitStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
   })
 
   const output = logs.join('\n')
 
-  // This is the bug: the user was left in the parent directory with no
-  // `cd` instruction.
+  // This is the bug (deka#1103): the user was left in the parent directory
+  // with no `cd` instruction, and told to run a bare `deka dev` that isn't
+  // on PATH for a project-local install.
   assert.match(output, /cd myapp\b/, 'output must name the project directory in a cd line')
-  assert.match(output, /^\s*deka dev\s*$/m, 'output must give the canonical `deka dev` command')
+  assert.match(output, /^\s*npm run dev\b/m, 'npm projects must be told to run `npm run dev`, not a bare `deka dev`')
+  assert.match(output, /npx deka dev/, 'must also mention the direct npx form as an alternative')
 })
 
-test('a `cd <dir>` line that disappears from the final output fails this suite', () => {
+test('a `cd <dir>` line that disappears from the final output fails this suite', async () => {
   // Directly guards against a regression where printNextSteps's cd line is
   // dropped (e.g. someone "simplifies" it away) without a matching test
   // failure. This does not call createApp -- it exercises the same
   // contract the previous test checks, worded as an explicit trap so the
   // intent is unmissable in a diff.
   const logs = []
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd: tmp('cda-nextsteps-trap-'),
     env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
@@ -211,7 +251,8 @@ test('a `cd <dir>` line that disappears from the final output fails this suite',
     arch: 'x64',
     ownVersion: OWN_VERSION,
     log: (msg) => logs.push(msg),
-    spawn: makeSpawnStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+    spawn: makeSpawnStub({}),
+    runDekaInit: makeRunDekaInitStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
   })
   assert.ok(
     logs.some((line) => /^\s*cd myapp\s*$/.test(line)),
@@ -219,11 +260,11 @@ test('a `cd <dir>` line that disappears from the final output fails this suite',
   )
 })
 
-test("deka init's own bare-command next-steps block is suppressed, not printed alongside ours", () => {
+test("deka init's own bare-command next-steps block is suppressed, not printed alongside ours", async () => {
   const cwd = tmp('cda-suppress-')
   const logs = []
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
@@ -231,7 +272,8 @@ test("deka init's own bare-command next-steps block is suppressed, not printed a
     arch: 'x64',
     ownVersion: OWN_VERSION,
     log: (msg) => logs.push(msg),
-    spawn: makeSpawnStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+    spawn: makeSpawnStub({}),
+    runDekaInit: makeRunDekaInitStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
   })
 
   const output = logs.join('\n')
@@ -251,11 +293,11 @@ test("deka init's own bare-command next-steps block is suppressed, not printed a
   assert.match(output, /\[create\] myapp\/deka\.json/, 'progress output before next-steps must survive filtering')
 })
 
-test('install failure with no fallback available surfaces an actionable error and stops before deka init', () => {
+test('install failure with no fallback available surfaces an actionable error and stops before deka init', async () => {
   const cwd = tmp('cda-install-fail-')
   const calls = []
 
-  assert.throws(
+  await assert.rejects(
     () =>
       createApp({
         targetArg: 'myapp',
@@ -289,10 +331,10 @@ test('install failure with no fallback available surfaces an actionable error an
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('missing binary after install is reported clearly', () => {
+test('missing binary after install is reported clearly', async () => {
   const cwd = tmp('cda-missing-bin-')
 
-  assert.throws(
+  await assert.rejects(
     () =>
       createApp({
         targetArg: 'myapp',
@@ -310,11 +352,11 @@ test('missing binary after install is reported clearly', () => {
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('generated package.json pins exactly create-deka-app\'s own version when it installs cleanly', () => {
+test('generated package.json pins exactly create-deka-app\'s own version when it installs cleanly', async () => {
   const cwd = tmp('cda-pkgjson-')
   const calls = []
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: {},
@@ -323,6 +365,7 @@ test('generated package.json pins exactly create-deka-app\'s own version when it
     ownVersion: OWN_VERSION,
     log: () => {},
     spawn: makeSpawnStub({ calls }),
+    runDekaInit: makeRunDekaInitStub({ calls }),
   })
 
   const pkg = JSON.parse(readFileSync(path.join(cwd, 'myapp', 'package.json'), 'utf8'))
@@ -339,12 +382,12 @@ test('generated package.json pins exactly create-deka-app\'s own version when it
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('falls back to the latest published runtime version, with a warning, when the exact pin fails to install', () => {
+test('falls back to the latest published runtime version, with a warning, when the exact pin fails to install', async () => {
   const cwd = tmp('cda-fallback-')
   const logs = []
   const installAttempts = []
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: {},
@@ -371,6 +414,7 @@ test('falls back to the latest published runtime version, with a warning, when t
       }
       return { status: 0 }
     },
+    runDekaInit: makeRunDekaInitStub(),
   })
 
   assert.deepEqual(
@@ -397,11 +441,11 @@ test('falls back to the latest published runtime version, with a warning, when t
   rmSync(cwd, { recursive: true, force: true })
 })
 
-test('falls back to the "latest" dist-tag when both the exact pin and the registry lookup fail', () => {
+test('falls back to the "latest" dist-tag when both the exact pin and the registry lookup fail', async () => {
   const cwd = tmp('cda-fallback-offline-')
   const logs = []
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: {},
@@ -425,6 +469,7 @@ test('falls back to the "latest" dist-tag when both the exact pin and the regist
       }
       return { status: 0 }
     },
+    runDekaInit: makeRunDekaInitStub(),
   })
 
   const pkg = JSON.parse(readFileSync(path.join(cwd, 'myapp', 'package.json'), 'utf8'))
@@ -495,11 +540,11 @@ test('resolveRuntimeVersion: pins a canary ownVersion verbatim, suffix and all',
   assert.equal(version, CANARY_OWN_VERSION)
 })
 
-test("generated package.json pins create-deka-app's own canary version exactly, including the -canary-<sha> suffix", () => {
+test("generated package.json pins create-deka-app's own canary version exactly, including the -canary-<sha> suffix", async () => {
   const cwd = tmp('cda-canary-pkgjson-')
   const calls = []
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: {},
@@ -508,6 +553,7 @@ test("generated package.json pins create-deka-app's own canary version exactly, 
     ownVersion: CANARY_OWN_VERSION,
     log: () => {},
     spawn: makeSpawnStub({ calls }),
+    runDekaInit: makeRunDekaInitStub({ calls }),
   })
 
   const pkg = JSON.parse(readFileSync(path.join(cwd, 'myapp', 'package.json'), 'utf8'))
@@ -546,13 +592,13 @@ test('resolveLatestRuntimeVersion: an unreachable registry on the canary channel
   assert.equal(version, 'canary')
 })
 
-test('a canary create-deka-app whose exact pin fails to install falls back to the canary dist-tag, not latest stable', () => {
+test('a canary create-deka-app whose exact pin fails to install falls back to the canary dist-tag, not latest stable', async () => {
   const cwd = tmp('cda-canary-fallback-')
   const viewCalls = []
   const installAttempts = []
   const CANARY_FALLBACK_VERSION = '0.59.0-canary-e4f5a6b'
 
-  createApp({
+  await createApp({
     targetArg: 'myapp',
     cwd,
     env: {},
@@ -578,6 +624,7 @@ test('a canary create-deka-app whose exact pin fails to install falls back to th
       }
       return { status: 0 }
     },
+    runDekaInit: makeRunDekaInitStub(),
   })
 
   assert.deepEqual(
@@ -589,5 +636,80 @@ test('a canary create-deka-app whose exact pin fails to install falls back to th
 
   const pkg = JSON.parse(readFileSync(path.join(cwd, 'myapp', 'package.json'), 'utf8'))
   assert.equal(pkg.devDependencies[RUNTIME_PACKAGE], CANARY_FALLBACK_VERSION)
+  rmSync(cwd, { recursive: true, force: true })
+})
+
+// deka#1103: the actual bug -- `deka` is never on PATH for a project-local
+// install, so the "Next steps" must give a command each package manager
+// can actually run (its own `dev` script) rather than a bare `deka dev`,
+// with the direct node_modules/.bin form mentioned as an alternative.
+const NEXT_STEPS_BY_PM = [
+  { userAgent: 'npm/10.2.4 node/v20.11.0 linux x64', run: 'npm run dev', direct: 'npx deka dev' },
+  { userAgent: 'pnpm/8.15.1 npm/? node/v20.11.0 linux x64', run: 'pnpm dev', direct: 'pnpm exec deka dev' },
+  { userAgent: 'yarn/1.22.19 npm/? node/v20.11.0 linux x64', run: 'yarn dev', direct: 'yarn deka dev' },
+  { userAgent: 'bun/1.1.0 npm/? node/v20.11.0 linux x64', run: 'bun dev', direct: 'bunx deka dev' },
+]
+
+for (const { userAgent, run: runCmd, direct } of NEXT_STEPS_BY_PM) {
+  test(`next steps for ${userAgent.split('/')[0]}: "${runCmd}" with "${direct}" as the direct alternative`, async () => {
+    const cwd = tmp('cda-nextsteps-pm-')
+    const logs = []
+
+    await createApp({
+      targetArg: 'myapp',
+      cwd,
+      env: { npm_config_user_agent: userAgent },
+      platform: 'linux',
+      arch: 'x64',
+      ownVersion: OWN_VERSION,
+      log: (msg) => logs.push(msg),
+      spawn: makeSpawnStub({}),
+      runDekaInit: makeRunDekaInitStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+    })
+
+    const output = logs.join('\n')
+    assert.ok(
+      logs.some((line) => line.includes(runCmd)),
+      `expected a line with "${runCmd}"; got:\n${output}`
+    )
+    assert.ok(
+      logs.some((line) => line.includes(direct)),
+      `expected the direct alternative "${direct}" to be mentioned; got:\n${output}`
+    )
+    rmSync(cwd, { recursive: true, force: true })
+  })
+}
+
+test('the deka banner is printed once, as the very first output, before the install step', async () => {
+  const cwd = tmp('cda-banner-')
+  const logs = []
+
+  await createApp({
+    targetArg: 'myapp',
+    cwd,
+    env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
+    platform: 'linux',
+    arch: 'x64',
+    ownVersion: OWN_VERSION,
+    log: (msg) => logs.push(msg),
+    spawn: makeSpawnStub({}),
+    runDekaInit: makeRunDekaInitStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+  })
+
+  const bannerIndex = logs.findIndex((line) => /[░█]/.test(line))
+  const installIndex = logs.findIndex((line) => /Installing the deka runtime/.test(line))
+
+  assert.notEqual(bannerIndex, -1, 'the banner must be printed')
+  assert.notEqual(installIndex, -1, 'the install step line must be printed')
+  assert.equal(bannerIndex, 0, 'the banner must be the very first thing printed')
+  assert.ok(bannerIndex < installIndex, 'the banner must come before the install step')
+
+  // Only one `log()` call contains banner glyphs -- create-deka-app's own,
+  // printed up front. (Whether deka init's own copy would have been a
+  // second one is covered separately, at the filter level, in
+  // test/init-output-filter.test.js -- REAL_DEKA_INIT_OUTPUT here carries
+  // no banner text of its own.)
+  const bannerLogCalls = logs.filter((line) => /[░█]/.test(line))
+  assert.equal(bannerLogCalls.length, 1, `expected exactly one log() call with banner glyphs; got:\n${logs.join('\n')}`)
   rmSync(cwd, { recursive: true, force: true })
 })

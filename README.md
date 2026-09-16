@@ -3,7 +3,9 @@
 Scaffold a new [deka](https://deka.gg) app.
 
 ```sh
-npx create-deka-app@latest myapp
+npm create deka-app@latest myapp
+cd myapp
+npm run dev
 ```
 
 Every package manager's `create` shortcut resolves to this package:
@@ -28,6 +30,14 @@ everything non-interactively — no prompts:
    yarn or bun)
 4. runs `deka init` from the freshly installed binary — the real
    scaffolder, which never overwrites a file that's already there
+
+`@dekaruntime/deka` is installed as a project **devDependency**, not
+globally — the `deka` binary on your PATH is only ever there if you used
+the separate curl installer. Inside a scaffolded project, run it through
+your package manager instead: `npm run dev`, or directly via `npx deka
+dev` (`pnpm dev` / `pnpm exec deka dev`, `yarn dev` / `yarn deka dev`,
+`bun dev` / `bunx deka dev` for the other package managers). The printed
+"Next steps" always matches whichever one scaffolded your project.
 
 See [deka#1091](https://github.com/dekaruntime/deka/issues/1091) for the
 design history.
