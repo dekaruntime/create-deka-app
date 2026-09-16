@@ -29,6 +29,36 @@ function dekaBinPath(targetDir, platform) {
   return path.join(targetDir, 'node_modules', '.bin', platform === 'win32' ? 'deka.cmd' : 'deka')
 }
 
+// `deka init`'s own "next steps" block always starts with a line beginning
+// "[init]" (verified against the real binary: `[init] DekaScript app
+// ready` followed by 1-2 indented command lines). Everything from that
+// line onward is deka's suggestion for what to run next, and we always
+// replace it with our own -- see printNextSteps below for why. Everything
+// before it (the banner, the per-file `[create] ...` lines) is left
+// intact so the user still sees the scaffold happen.
+function stripDekaNextSteps(output) {
+  if (!output) return ''
+  const lines = String(output).split(/\r?\n/)
+  const cutIndex = lines.findIndex((line) => line.startsWith('[init]'))
+  return cutIndex === -1 ? String(output) : lines.slice(0, cutIndex).join('\n')
+}
+
+// deka init's own next-steps text always tells the user to run a bare
+// `deka ...` command, because that's correct advice for someone who ran
+// `deka init` by hand with deka already on their PATH. It is wrong advice
+// here: create-deka-app only ever installs deka into this project's own
+// node_modules/.bin, so a bare `deka` command fails for a user who has no
+// global install. We suppress deka's block (stripDekaNextSteps) and print
+// our own -- the `cd` line plus the detected package manager's own idiom
+// for running the "dev" script already sitting in package.json, which
+// works with nothing beyond what the install step just put on disk.
+function printNextSteps(log, dirName, pm) {
+  log('')
+  log('  Next steps:')
+  log(`    cd ${dirName}`)
+  log(`    ${pm.runScript('dev')}`)
+}
+
 export const RUNTIME_PACKAGE = '@dekaruntime/deka'
 
 // Builds the package.json this package writes into every scaffolded
@@ -168,17 +198,38 @@ export function createApp({
     )
   }
 
-  const init = spawn(dekaBin, ['init'], { cwd: targetDir, stdio: 'inherit' })
+  // Invoked as `deka init <dirName>` from the *parent* directory -- the
+  // same shape as someone typing `deka init myapp` by hand -- rather than
+  // `deka init` with cwd already set to targetDir. deka init never
+  // overwrites a file that already exists (package.json, written above,
+  // survives untouched), and this shape is what makes deka's own output
+  // reference the right directory name if any of it leaks through.
+  const dirName = path.basename(targetDir)
+  const parentDir = path.dirname(targetDir)
+  const init = spawn(dekaBin, ['init', dirName], {
+    cwd: parentDir,
+    stdio: ['inherit', 'pipe', 'pipe'],
+    encoding: 'utf8',
+  })
 
   if (init.error) {
     throw new ScaffoldError(`Could not run "deka init" in ${targetDir}: ${init.error.message}`)
   }
   if (init.status !== 0) {
+    // Something went wrong -- show everything deka printed, unfiltered,
+    // so the real error is visible. Filtering only ever happens below, on
+    // the success path, where we know exactly what we're throwing away.
+    if (init.stdout) log(String(init.stdout))
+    if (init.stderr) log(String(init.stderr))
     throw new ScaffoldError(
       `"deka init" failed in ${targetDir} (exit code ${init.status}).`,
       init.status ?? 1
     )
   }
+
+  if (init.stdout) log(stripDekaNextSteps(init.stdout))
+  if (init.stderr) log(stripDekaNextSteps(init.stderr))
+  printNextSteps(log, dirName, pm)
 
   return 0
 }
