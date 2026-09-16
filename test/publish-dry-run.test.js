@@ -31,7 +31,24 @@ function packDryRun(pkgDir, pkgName) {
     cwd: pkgDir,
     encoding: 'utf8',
   })
-  const [report] = JSON.parse(output)
+  // `npm pack --dry-run --json` returns an ARRAY of reports on npm 11.x but a
+  // single OBJECT on newer npm. The publish workflows run `npm install -g
+  // npm@latest`, so they hit the object shape and destructuring threw
+  // "object is not iterable" -- eight green PR runs, then a failed publish
+  // (run 35042419589). Accept both shapes.
+  // `npm pack --dry-run --json` has three shapes across versions:
+  //   npm 11.x : [ { name, files, ... } ]              (array of reports)
+  //   npm 12.x : { "@scope/name": { name, files, ... } } (keyed by package)
+  //   defensive: { name, files, ... }                   (a bare report)
+  // The publish workflows run `npm install -g npm@latest`, so CI must handle
+  // whichever the installed npm produces -- an array-only read threw
+  // "object is not iterable" and broke the v0.0.3 publish (run 35042419589).
+  const parsed = JSON.parse(output)
+  const report = Array.isArray(parsed)
+    ? parsed[0]
+    : parsed && typeof parsed === 'object' && !parsed.name
+      ? Object.values(parsed)[0]
+      : parsed
   assert.ok(report, `npm pack --dry-run --json produced no report for ${pkgDir}`)
   assert.equal(report.name, pkgName)
   return report.files.map((f) => f.path)
