@@ -199,12 +199,12 @@ export function createApp({
   // given create-deka-app version always produces the same project).
   //
   // The one case this doesn't cover is a create-deka-app release whose
-  // exact-matching runtime build isn't published yet (or never will be --
-  // e.g. a scaffolder-only patch released via publish.yml, see its header
-  // comment). That surfaces as the install below failing, and is handled
-  // as a fallback: re-resolve against the registry and retry once, never
-  // silently leaving a nonexistent version pinned in the final
-  // package.json (the ETARGET bug fixed in 0.0.3).
+  // exact-matching runtime build isn't published yet (there is no
+  // standalone scaffolder-only release path -- one publish path,
+  // .github/workflows/publish-runtime.yml). That surfaces as the install
+  // below failing, and is handled as a fallback: re-resolve against the
+  // registry and retry once, never silently leaving a nonexistent version
+  // pinned in the final package.json (the ETARGET bug fixed in 0.0.3).
   let runtimeVersion = resolveRuntimeVersion({ ownVersion })
 
   const writePackageJson = (version) => {
