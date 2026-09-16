@@ -34,6 +34,11 @@ on:
   # would need a token with access to this repo), and a missed release should
   # not sit unpublished. The job exits early when npm already has the version,
   # so a daily run is a no-op in the normal case.
+  # Sent by deka's and dsc's release workflows via CASCADE_DISPATCH_TOKEN, so a
+  # release publishes immediately instead of waiting for the hourly check.
+  repository_dispatch:
+    types: [deka-released, dsc-released]
+
   schedule:
     - cron: '17 * * * *'
 
