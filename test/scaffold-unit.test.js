@@ -12,7 +12,10 @@ function tmp(prefix) {
 
 // Standard spawn stub for tests that need a successful install: distinguishes
 // `npm view` (the registry lookup) from `npm install`, and records every call.
-function makeSpawnStub({ calls = [], viewStdout = '9.9.9\n' } = {}) {
+// `initOutput` stands in for what the real deka binary prints on init --
+// tests that care about next-steps filtering pass their own to prove
+// stripDekaNextSteps behaves against realistic input.
+function makeSpawnStub({ calls = [], viewStdout = '9.9.9\n', initOutput = '' } = {}) {
   return (cmd, args, opts) => {
     calls.push([cmd, args, opts.cwd])
     if (cmd === 'npm' && args[0] === 'view') {
@@ -23,9 +26,32 @@ function makeSpawnStub({ calls = [], viewStdout = '9.9.9\n' } = {}) {
       writeFileSync(path.join(opts.cwd, 'node_modules', '.bin', 'deka'), '#!/bin/sh\n')
       return { status: 0 }
     }
+    if (String(cmd).endsWith(path.join('node_modules', '.bin', 'deka'))) {
+      return { status: 0, stdout: initOutput }
+    }
     return { status: 0 }
   }
 }
+
+// The real deka binary's own next-steps block, captured by actually running
+// `deka init myapp` (v0.53.2) with cwd set to the parent directory and
+// `myapp` as the positional argument -- the exact invocation shape this
+// fix switches to. Used to prove stripDekaNextSteps and create-deka-app's
+// own printed next steps behave against real output, not just an
+// abbreviated stub.
+const REAL_DEKA_INIT_OUTPUT = `[create] myapp/deka.json
+[create] myapp/deka.lock
+[create] myapp/.gitignore
+[create] myapp/index.html
+[create] myapp/app/layout.dsx
+[create] myapp/app/page.dsx
+[create] myapp/app/Counter.dsx
+[create] myapp/public/style.css
+[create] myapp/public/404.html
+[init] DekaScript app ready
+  cd myapp
+  deka serve
+`
 
 test('no argument: prints usage, exits non-zero, does not touch cwd', () => {
   const cwd = tmp('cda-no-arg-')
@@ -105,8 +131,93 @@ test('existing empty directory is accepted', () => {
   assert.deepEqual(calls[0], ['npm', ['view', RUNTIME_PACKAGE, 'version'], target])
   assert.deepEqual(calls[1], ['npm', ['install'], target])
   assert.equal(calls[2][0], path.join(target, 'node_modules', '.bin', 'deka'))
-  assert.deepEqual(calls[2][1], ['init'])
+  assert.deepEqual(
+    calls[2][1],
+    ['init', 'myapp'],
+    'deka init must be invoked with the directory name as an argument, the same shape as running it by hand'
+  )
+  assert.equal(
+    calls[2][2],
+    cwd,
+    'deka init must run with cwd set to the *parent* directory, not the new project directory, ' +
+      'so deka prints a `cd myapp` line instead of advice with nothing to cd into'
+  )
   rmSync(cwd, { recursive: true, force: true })
+})
+
+test('final output tells the user to cd into the project and gives a runnable dev command', () => {
+  const cwd = tmp('cda-nextsteps-')
+  const logs = []
+
+  createApp({
+    targetArg: 'myapp',
+    cwd,
+    env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
+    platform: 'linux',
+    arch: 'x64',
+    log: (msg) => logs.push(msg),
+    spawn: makeSpawnStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+  })
+
+  const output = logs.join('\n')
+
+  // This is the bug: the user was left in the parent directory with no
+  // `cd` instruction, and a `deka dev` suggestion that isn't on PATH.
+  assert.match(output, /cd myapp\b/, 'output must name the project directory in a cd line')
+  assert.match(output, /npm run dev/, 'output must give a command runnable via the package manager')
+})
+
+test('a `cd <dir>` line that disappears from the final output fails this suite', () => {
+  // Directly guards against a regression where printNextSteps's cd line is
+  // dropped (e.g. someone "simplifies" it away) without a matching test
+  // failure. This does not call createApp -- it exercises the same
+  // contract the previous test checks, worded as an explicit trap so the
+  // intent is unmissable in a diff.
+  const logs = []
+  createApp({
+    targetArg: 'myapp',
+    cwd: tmp('cda-nextsteps-trap-'),
+    env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
+    platform: 'linux',
+    arch: 'x64',
+    log: (msg) => logs.push(msg),
+    spawn: makeSpawnStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+  })
+  assert.ok(
+    logs.some((line) => /^\s*cd myapp\s*$/.test(line)),
+    `expected a standalone "cd myapp" line in the output; got:\n${logs.join('\n')}`
+  )
+})
+
+test("deka init's own bare-command next-steps block is suppressed, not printed alongside ours", () => {
+  const cwd = tmp('cda-suppress-')
+  const logs = []
+
+  createApp({
+    targetArg: 'myapp',
+    cwd,
+    env: { npm_config_user_agent: 'npm/10.2.4 node/v20.11.0 linux x64' },
+    platform: 'linux',
+    arch: 'x64',
+    log: (msg) => logs.push(msg),
+    spawn: makeSpawnStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
+  })
+
+  const output = logs.join('\n')
+  // REAL_DEKA_INIT_OUTPUT's own suggestion is a bare "  deka serve" line
+  // with nothing else on it -- must not survive filtering. (`deka serve`
+  // as a substring is fine if it ever showed up inside create-deka-app's
+  // own text, which it doesn't today; the anchored line is the precise
+  // thing that must vanish.)
+  assert.doesNotMatch(
+    output,
+    /^\s*deka serve\s*$/m,
+    "deka's own bare next-steps command must not appear -- it isn't runnable without a global install, " +
+      "and two competing next-steps blocks would confuse the user this fix is for"
+  )
+  // The per-file [create] progress lines deka prints before its next-steps
+  // block must still come through -- only the next-steps tail is filtered.
+  assert.match(output, /\[create\] myapp\/deka\.json/, 'progress output before next-steps must survive filtering')
 })
 
 test('install failure surfaces an actionable error and stops before deka init', () => {

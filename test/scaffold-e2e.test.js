@@ -6,6 +6,13 @@
 // and that `deka init` (step 4) actually runs. Removing the deka-init call
 // from src/scaffold.js makes this fail (no deka.json, and the
 // order-of-operations log is too short).
+//
+// The stubbed deka binary also mimics the real one's "next steps" output
+// (a `[init] ...` line followed by a bare `deka serve` suggestion, verified
+// against the actual published binary -- see PR description) so this test
+// proves create-deka-app suppresses that and prints its own `cd` + package
+// manager dev command instead, rather than just asserting against the stub
+// in isolation.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync } from 'node:fs'
@@ -36,6 +43,12 @@ const STUB_RUNTIME_VERSION = '9.9.9'
 //    existed, to prove write-before-install ordering), then materializes
 //    node_modules/.bin/deka as a second stub standing in for the real
 //    platform binary that a genuine install would have fetched.
+//
+// The deka stub is invoked as `deka init <dirName>` from the *parent*
+// directory (create-deka-app's new invocation shape) and, like the real
+// binary, creates its files inside `$2` and prints a `[init] ...` block
+// ending in a bare `deka serve` suggestion -- the exact suggestion
+// create-deka-app must suppress and replace.
 function writeStubNpm(binDir, logFile) {
   const npmPath = path.join(binDir, 'npm')
   writeFileSync(
@@ -55,8 +68,12 @@ cat > node_modules/.bin/deka <<'DEKA_EOF'
 #!/bin/sh
 echo "deka $*|$(pwd)" >> "${logFile}"
 if [ "$1" = "init" ]; then
-  echo '{"stub":true}' > deka.json
-  echo "[init] project scaffolded (stub)"
+  DIR="$2"
+  echo '{"stub":true}' > "$DIR/deka.json"
+  echo "[create] $DIR/deka.json"
+  echo "[init] DekaScript app ready"
+  echo "  cd $DIR"
+  echo "  deka serve"
 fi
 exit 0
 DEKA_EOF
@@ -127,7 +144,35 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
     'the runtime version must be resolved from the registry before package.json is written'
   )
   assert.match(log[1], /^npm install\|saw-package-json=yes\|/, 'package.json must be written before install runs')
-  assert.match(log[2], /^deka init\|/, 'deka init must run, and run after install')
+  assert.equal(
+    log[2],
+    `deka init myapp|${work}`,
+    'deka init must run after install, invoked with the directory name as an argument, from the parent directory'
+  )
+
+  // The bug this suite guards against: the user is left in the parent
+  // directory with no indication they must `cd` into the new project, and
+  // told to run a bare `deka` command that isn't on their PATH. The final
+  // output must name the project directory in a `cd` line and give a
+  // command that runs via the package manager (works with nothing beyond
+  // what install already put in node_modules/.bin) -- and deka's own
+  // suggestion (a bare "deka serve") must not appear at all, since two
+  // competing next-steps blocks would be worse than one wrong one.
+  assert.match(
+    output,
+    /cd myapp/,
+    'must tell the user to cd into the new project directory -- this is the line the bug report showed missing'
+  )
+  assert.match(
+    output,
+    /npm run dev/,
+    'must give a dev command that works via the package manager, not a bare `deka` command'
+  )
+  assert.doesNotMatch(
+    output,
+    /^\s*deka serve\s*$/m,
+    "deka init's own bare-command suggestion must be suppressed, not printed alongside create-deka-app's own"
+  )
 
   rmSync(work, { recursive: true, force: true })
 })
