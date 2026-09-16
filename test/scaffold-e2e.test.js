@@ -1,10 +1,11 @@
 // End-to-end: runs the real CLI (index.js) as a subprocess, with a stubbed
 // package manager and a stubbed deka binary on PATH standing in for the
 // real npm registry and the real deka platform binary. Nothing here mocks
-// createApp's internals — it proves the whole chain: directory creation,
-// package.json contents, the install step, and that `deka init` (step 4)
-// actually runs. Removing the deka-init call from src/scaffold.js makes
-// this fail (no deka.json, and the order-of-operations log is too short).
+// createApp's internals — it proves the whole chain: the registry version
+// lookup, directory creation, package.json contents, the install step,
+// and that `deka init` (step 4) actually runs. Removing the deka-init call
+// from src/scaffold.js makes this fail (no deka.json, and the
+// order-of-operations log is too short).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync } from 'node:fs'
@@ -21,17 +22,31 @@ function tmp(prefix) {
   return mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
-// Writes a fake `npm` onto PATH that mimics just enough of `npm install`:
-// it records that it ran (and whether package.json already existed, to
-// prove write-before-install ordering), then materializes
-// node_modules/.bin/deka as a second stub standing in for the real
-// platform binary that a genuine install would have fetched.
+// Resolved version returned by the stubbed `npm view` below, standing in
+// for whatever is actually latest on the real registry. Deliberately
+// different from both create-deka-app's own version and from a plausible
+// runtime version, so a test that mixes them up fails loudly.
+const STUB_RUNTIME_VERSION = '9.9.9'
+
+// Writes a fake `npm` onto PATH that mimics just enough of npm to drive the
+// real CLI end to end:
+//  - `npm view @dekaruntime/deka version` (the registry lookup) prints
+//    STUB_RUNTIME_VERSION and logs that it ran.
+//  - `npm install` records that it ran (and whether package.json already
+//    existed, to prove write-before-install ordering), then materializes
+//    node_modules/.bin/deka as a second stub standing in for the real
+//    platform binary that a genuine install would have fetched.
 function writeStubNpm(binDir, logFile) {
   const npmPath = path.join(binDir, 'npm')
   writeFileSync(
     npmPath,
     `#!/bin/sh
 set -e
+if [ "$1" = "view" ]; then
+  echo "npm view $2 $3|$(pwd)" >> "${logFile}"
+  echo "${STUB_RUNTIME_VERSION}"
+  exit 0
+fi
 SAW_PKG_JSON=no
 if [ -f package.json ]; then SAW_PKG_JSON=yes; fi
 echo "npm install|saw-package-json=$SAW_PKG_JSON|$(pwd)" >> "${logFile}"
@@ -85,8 +100,13 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
   assert.deepEqual(pkg.scripts, { dev: 'deka dev', build: 'deka build', start: 'deka start' })
   assert.equal(
     pkg.devDependencies['@dekaruntime/deka'],
+    STUB_RUNTIME_VERSION,
+    'must pin the @dekaruntime/deka version resolved from the registry (npm view)'
+  )
+  assert.notEqual(
+    pkg.devDependencies['@dekaruntime/deka'],
     ownVersion,
-    'must pin @dekaruntime/deka at create-deka-app\'s own version (lockstep)'
+    "must NOT pin create-deka-app's own version -- the two release lines are not in lockstep"
   )
 
   // Proof that step 4 (deka init) actually ran, not just that install did.
@@ -98,11 +118,16 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
   const log = readFileSync(logFile, 'utf8').trim().split('\n')
   assert.equal(
     log.length,
-    2,
-    `expected exactly [npm install, deka init], got:\n${log.join('\n')}`
+    3,
+    `expected exactly [npm view, npm install, deka init], got:\n${log.join('\n')}`
   )
-  assert.match(log[0], /^npm install\|saw-package-json=yes\|/, 'package.json must be written before install runs')
-  assert.match(log[1], /^deka init\|/, 'deka init must run, and run after install')
+  assert.match(
+    log[0],
+    /^npm view @dekaruntime\/deka version\|/,
+    'the runtime version must be resolved from the registry before package.json is written'
+  )
+  assert.match(log[1], /^npm install\|saw-package-json=yes\|/, 'package.json must be written before install runs')
+  assert.match(log[2], /^deka init\|/, 'deka init must run, and run after install')
 
   rmSync(work, { recursive: true, force: true })
 })
