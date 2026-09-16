@@ -1,0 +1,34 @@
+{
+  "name": "@dekaruntime/dsc",
+  "version": "0.0.0-dev",
+  "description": "dsc compiler launcher. Resolves and execs the platform binary installed via optionalDependencies. Install this on its own for editor tooling or CI type-checking without the deka runtime.",
+  "bin": {
+    "dsc": "bin.js"
+  },
+  "files": [
+    "bin.js",
+    "launcher-core.js"
+  ],
+  "optionalDependencies": {
+    "@dekaruntime/dsc-darwin-arm64": "0.0.0-dev",
+    "@dekaruntime/dsc-darwin-x64": "0.0.0-dev",
+    "@dekaruntime/dsc-linux-x64": "0.0.0-dev"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dekaruntime/create-deka-app.git",
+    "directory": "npm/dsc"
+  },
+  "homepage": "https://deka.gg",
+  "bugs": "https://github.com/dekaruntime/deka/issues",
+  "license": "Apache-2.0",
+  "keywords": [
+    "deka",
+    "dekascript",
+    "compiler",
+    "cli"
+  ]
+}

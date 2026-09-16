@@ -1,0 +1,22 @@
+{
+  "name": "@dekaruntime/dsc-linux-x64",
+  "version": "0.0.0-dev",
+  "description": "dsc prebuilt binary for linux-x64. Downloaded from the dsc release by CI and never built in this repo.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dekaruntime/create-deka-app.git",
+    "directory": "npm/dsc-linux-x64"
+  },
+  "homepage": "https://deka.gg",
+  "bugs": "https://github.com/dekaruntime/deka/issues",
+  "license": "Apache-2.0"
+}

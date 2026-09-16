@@ -1,0 +1,38 @@
+{
+  "name": "@dekaruntime/deka",
+  "version": "0.0.0-dev",
+  "description": "deka runtime launcher. Resolves and execs the platform binary installed via optionalDependencies; ships both the deka and dsc commands.",
+  "bin": {
+    "deka": "bin.js",
+    "dsc": "bin.js"
+  },
+  "files": [
+    "bin.js",
+    "launcher-core.js"
+  ],
+  "dependencies": {
+    "@dekaruntime/dsc": "0.0.0-dev"
+  },
+  "optionalDependencies": {
+    "@dekaruntime/deka-darwin-arm64": "0.0.0-dev",
+    "@dekaruntime/deka-darwin-x64": "0.0.0-dev",
+    "@dekaruntime/deka-linux-x64": "0.0.0-dev"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dekaruntime/create-deka-app.git",
+    "directory": "npm/deka"
+  },
+  "homepage": "https://deka.gg",
+  "bugs": "https://github.com/dekaruntime/deka/issues",
+  "license": "Apache-2.0",
+  "keywords": [
+    "deka",
+    "dekascript",
+    "runtime",
+    "cli"
+  ]
+}
