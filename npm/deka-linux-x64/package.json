@@ -1,0 +1,22 @@
+{
+  "name": "@dekaruntime/deka-linux-x64",
+  "version": "0.0.0-dev",
+  "description": "deka prebuilt binary for linux-x64. Ships both the deka and dsc binaries as siblings (deka's runtime dsc lookup is sibling-only). Downloaded from the deka release by CI and never built in this repo.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dekaruntime/create-deka-app.git",
+    "directory": "npm/deka-linux-x64"
+  },
+  "homepage": "https://deka.gg",
+  "bugs": "https://github.com/dekaruntime/deka/issues",
+  "license": "Apache-2.0"
+}

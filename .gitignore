@@ -1,3 +1,7 @@
 node_modules/
 *.tgz
 .tmp/
+
+# CI downloads deka/dsc binaries here at publish time; this repo never
+# commits binaries (deka#1091).
+npm/*/bin/

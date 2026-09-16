@@ -1,0 +1,303 @@
+# Publishes the 8 deka/dsc runtime packages under npm/ to npm.
+#
+# Hard constraint (Sami, deka#1091): this repo NEVER compiles Rust and NEVER
+# commits binaries or version bumps. This workflow downloads prebuilt
+# binaries from the deka/dsc release hosts into npm/*/bin/ (git-ignored) in
+# a single ubuntu-latest job, verifies every sha256 against the release
+# manifest, stamps versions into package.json IN THE WORKING TREE ONLY,
+# publishes, and the runner is discarded. Nothing is ever git-added,
+# git-committed or git-pushed here except a lightweight tag after a
+# successful publish.
+#
+# This file owns the deka-v*/dsc-v* tag namespaces. publish.yml (v* ->
+# create-deka-app) is untouched and independent.
+name: publish-runtime
+
+on:
+  push:
+    tags:
+      - 'deka-v*'
+      - 'dsc-v*'
+  workflow_dispatch:
+    inputs:
+      family:
+        description: 'Which family to publish'
+        required: true
+        type: choice
+        options: [deka, dsc]
+      version:
+        description: 'Version to publish (blank = resolve from latest.json)'
+        required: false
+        type: string
+  repository_dispatch:
+    types: [deka-released, dsc-released]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # to push the deka-v*/dsc-v* tag after a successful publish
+      id-token: write # OIDC: trusted publishing, no NPM_TOKEN
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. Resolve family + version. Three trigger shapes feed the same
+      #    inputs: a tag push encodes both in GITHUB_REF_NAME, dispatch
+      #    inputs are explicit, repository_dispatch encodes family in the
+      #    event type and carries an optional version hint in the payload.
+      # ------------------------------------------------------------------
+      - name: Resolve family and requested version
+        id: trigger
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            push)
+              TAG="${GITHUB_REF_NAME}"
+              FAMILY="${TAG%%-v*}"
+              REQUESTED_VERSION="${TAG#*-v}"
+              WAS_TAG_PUSH=true
+              ;;
+            workflow_dispatch)
+              FAMILY="${{ inputs.family }}"
+              REQUESTED_VERSION="${{ inputs.version }}"
+              WAS_TAG_PUSH=false
+              ;;
+            repository_dispatch)
+              case "${{ github.event.action }}" in
+                deka-released) FAMILY=deka ;;
+                dsc-released) FAMILY=dsc ;;
+                *) echo "::error::unknown repository_dispatch action ${{ github.event.action }}"; exit 1 ;;
+              esac
+              REQUESTED_VERSION="${{ github.event.client_payload.version }}"
+              WAS_TAG_PUSH=false
+              ;;
+            *)
+              echo "::error::unsupported event ${{ github.event_name }}"
+              exit 1
+              ;;
+          esac
+
+          if [ "$FAMILY" != "deka" ] && [ "$FAMILY" != "dsc" ]; then
+            echo "::error::family must be 'deka' or 'dsc', got '$FAMILY'"
+            exit 1
+          fi
+
+          {
+            echo "family=$FAMILY"
+            echo "requested_version=$REQUESTED_VERSION"
+            echo "was_tag_push=$WAS_TAG_PUSH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved trigger: family=$FAMILY requested_version=${REQUESTED_VERSION:-<latest>} was_tag_push=$WAS_TAG_PUSH"
+
+      - name: Resolve the version to publish (manifest is the source of truth)
+        id: version
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          REQUESTED_VERSION: ${{ steps.trigger.outputs.requested_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REQUESTED_VERSION" ]; then
+            VERSION="$REQUESTED_VERSION"
+          elif [ "$FAMILY" = "deka" ]; then
+            VERSION="$(curl -fsSL https://releases.deka.gg/latest.json | jq -r '.version')"
+          else
+            VERSION="$(curl -fsSL https://dsc-wasm.deka.gg/latest/release.json | jq -r '.version')"
+          fi
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::could not resolve a version to publish for family $FAMILY"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing $FAMILY@$VERSION"
+
+      # ------------------------------------------------------------------
+      # 2. Idempotency: exit 0 if npm already has this version. Makes a
+      #    re-run (or a future daily fallback schedule) safe to run
+      #    unconditionally.
+      # ------------------------------------------------------------------
+      - name: Check whether this version is already published
+        id: check
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          PUBLISHED="$(npm view "@dekaruntime/${FAMILY}@${VERSION}" version 2>/dev/null || true)"
+          if [ "$PUBLISHED" = "$VERSION" ]; then
+            echo "@dekaruntime/${FAMILY}@${VERSION} is already published; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1; setup-node's Node 22 ships
+      # an older npm. No secret is involved: npm exchanges this workflow's
+      # OIDC identity for a short-lived credential at publish time.
+      - name: Use an npm that understands trusted publishing
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # ------------------------------------------------------------------
+      # 4. deka's bundled dsc must be the version deka pins, and that dsc
+      #    version must already be on npm (publish dsc first otherwise).
+      # ------------------------------------------------------------------
+      - name: Resolve deka's pinned dsc version
+        id: dsc_pin
+        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DSC_VERSION="$(curl -fsSL "https://raw.githubusercontent.com/dekaruntime/deka/v${VERSION}/scripts/dsc-version" | tr -d '[:space:]')"
+          if [ -z "$DSC_VERSION" ]; then
+            echo "::error::could not read scripts/dsc-version from dekaruntime/deka@v${VERSION}"
+            exit 1
+          fi
+          echo "dsc_version=$DSC_VERSION" >> "$GITHUB_OUTPUT"
+          echo "deka@${VERSION} pins dsc@${DSC_VERSION}"
+
+      - name: Verify the pinned dsc version is already published
+        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
+        env:
+          DSC_VERSION: ${{ steps.dsc_pin.outputs.dsc_version }}
+        run: |
+          set -euo pipefail
+          PUBLISHED="$(npm view "@dekaruntime/dsc@${DSC_VERSION}" version 2>/dev/null || true)"
+          if [ "$PUBLISHED" != "$DSC_VERSION" ]; then
+            echo "::error::@dekaruntime/dsc@${DSC_VERSION} is not on npm yet. Publish the dsc family at that version first."
+            exit 1
+          fi
+          echo "@dekaruntime/dsc@${DSC_VERSION} is published; deka@${{ steps.version.outputs.version }} can depend on it."
+
+      # ------------------------------------------------------------------
+      # 3. Download into npm/<pkg>/bin/, verify every sha256, chmod +x, and
+      #    smoke-test the runner-native binary. Fails closed: any checksum
+      #    mismatch or missing manifest entry throws (scripts/lib/verify.js).
+      # ------------------------------------------------------------------
+      - name: Download and verify binaries
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DSC_VERSION: ${{ steps.dsc_pin.outputs.dsc_version }}
+        run: |
+          set -euo pipefail
+          if [ "$FAMILY" = "deka" ]; then
+            node scripts/sync.js --family deka --version "$VERSION" --dsc-version "$DSC_VERSION"
+          else
+            node scripts/sync.js --family dsc --version "$VERSION"
+          fi
+
+      # ------------------------------------------------------------------
+      # 5. Stamp the real version into package.json, in the working tree
+      #    only -- nothing here is ever committed.
+      # ------------------------------------------------------------------
+      - name: Stamp versions
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DSC_VERSION: ${{ steps.dsc_pin.outputs.dsc_version }}
+        run: |
+          set -euo pipefail
+
+          for platform in darwin-arm64 darwin-x64 linux-x64; do
+            pkg="npm/${FAMILY}-${platform}/package.json"
+            jq --arg v "$VERSION" '.version = $v' "$pkg" > "$pkg.tmp" && mv "$pkg.tmp" "$pkg"
+          done
+
+          launcher="npm/${FAMILY}/package.json"
+          jq --arg v "$VERSION" '
+            .version = $v
+            | .optionalDependencies["@dekaruntime/'"${FAMILY}"'-darwin-arm64"] = $v
+            | .optionalDependencies["@dekaruntime/'"${FAMILY}"'-darwin-x64"] = $v
+            | .optionalDependencies["@dekaruntime/'"${FAMILY}"'-linux-x64"] = $v
+          ' "$launcher" > "$launcher.tmp" && mv "$launcher.tmp" "$launcher"
+
+          if [ "$FAMILY" = "deka" ]; then
+            jq --arg d "$DSC_VERSION" '.dependencies["@dekaruntime/dsc"] = $d' "$launcher" > "$launcher.tmp" && mv "$launcher.tmp" "$launcher"
+          fi
+
+          echo "Stamped $FAMILY packages at $VERSION (working tree only; nothing committed):"
+          git diff --stat -- npm/ || true
+
+      # ------------------------------------------------------------------
+      # 6. Publish: platform packages first, launcher last. Trusted
+      #    publishing (OIDC) -- no NPM_TOKEN, no ~/.npmrc, no --provenance
+      #    flag (provenance is automatic for a public package from a
+      #    public repo).
+      # ------------------------------------------------------------------
+      - name: Publish platform packages
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+        run: |
+          set -euo pipefail
+          for platform in darwin-arm64 darwin-x64 linux-x64; do
+            (cd "npm/${FAMILY}-${platform}" && npm publish --access public)
+          done
+
+      - name: Publish the launcher
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+        run: |
+          set -euo pipefail
+          (cd "npm/${FAMILY}" && npm publish --access public)
+
+      # ------------------------------------------------------------------
+      # 7. Read back: fail the run if any of the four packages this run
+      #    published did not actually land on the registry.
+      # ------------------------------------------------------------------
+      - name: Read back from the registry
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
+            NAME="@dekaruntime/${pkg}"
+            OK=false
+            for i in $(seq 1 10); do
+              PUBLISHED="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
+              if [ "$PUBLISHED" = "$VERSION" ]; then
+                echo "${NAME}@${VERSION} is live on npm"
+                OK=true
+                break
+              fi
+              sleep 15
+            done
+            if [ "$OK" != "true" ]; then
+              echo "::error::${NAME}@${VERSION} did not appear on the registry"
+              exit 1
+            fi
+          done
+
+      # ------------------------------------------------------------------
+      # 8. Tag the publishing commit, unless the trigger was already a tag
+      #    push. The repo stays pristine -- this is the only git write in
+      #    the whole job, and only after a verified successful publish.
+      # ------------------------------------------------------------------
+      - name: Tag the publishing commit
+        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.was_tag_push != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${FAMILY}-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "${{ github.sha }}"
+          git push origin "$TAG"
