@@ -29,15 +29,13 @@ on:
         description: 'Version to publish (blank = resolve from latest.json)'
         required: false
         type: string
-  repository_dispatch:
-    types: [deka-released, dsc-released]
 
   # Fallback: nothing sends the dispatch above yet (deka/dsc release workflows
   # would need a token with access to this repo), and a missed release should
   # not sit unpublished. The job exits early when npm already has the version,
   # so a daily run is a no-op in the normal case.
   schedule:
-    - cron: '17 5 * * *'
+    - cron: '17 * * * *'
 
 jobs:
   publish:
@@ -250,8 +248,11 @@ jobs:
           FAMILY: ${{ steps.trigger.outputs.family }}
         run: |
           set -euo pipefail
+          # Published under `next`, not `latest`. Nothing an `npm install`
+          # resolves moves until every package in this release is verified,
+          # so a mid-run failure is invisible to consumers.
           for platform in darwin-arm64 darwin-x64 linux-x64; do
-            (cd "npm/${FAMILY}-${platform}" && npm publish --access public)
+            (cd "npm/${FAMILY}-${platform}" && npm publish --access public --tag next)
           done
 
       - name: Publish the launcher
@@ -260,7 +261,7 @@ jobs:
           FAMILY: ${{ steps.trigger.outputs.family }}
         run: |
           set -euo pipefail
-          (cd "npm/${FAMILY}" && npm publish --access public)
+          (cd "npm/${FAMILY}" && npm publish --access public --tag next)
 
       # ------------------------------------------------------------------
       # 7. Read back: fail the run if any of the four packages this run
@@ -287,6 +288,34 @@ jobs:
             done
             if [ "$OK" != "true" ]; then
               echo "::error::${NAME}@${VERSION} did not appear on the registry"
+              exit 1
+            fi
+          done
+
+      # ------------------------------------------------------------------
+      # 7b. All four are verified on the registry: promote them to `latest`
+      #     together. This is the all-or-nothing boundary -- until this step
+      #     runs, `npm install @dekaruntime/<pkg>` still resolves the previous
+      #     release. npm has no multi-package transaction, so this is the
+      #     closest thing to atomic that exists.
+      # ------------------------------------------------------------------
+      - name: Promote to latest
+        if: steps.check.outputs.skip != 'true'
+        env:
+          FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
+            NAME="@dekaruntime/${pkg}"
+            npm dist-tag add "${NAME}@${VERSION}" latest
+            echo "${NAME}@${VERSION} is now latest"
+          done
+          for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
+            NAME="@dekaruntime/${pkg}"
+            ACTUAL="$(npm view "${NAME}" dist-tags.latest 2>/dev/null || true)"
+            if [ "$ACTUAL" != "$VERSION" ]; then
+              echo "::error::${NAME} latest is ${ACTUAL}, expected ${VERSION}"
               exit 1
             fi
           done
