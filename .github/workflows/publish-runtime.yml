@@ -32,6 +32,13 @@ on:
   repository_dispatch:
     types: [deka-released, dsc-released]
 
+  # Fallback: nothing sends the dispatch above yet (deka/dsc release workflows
+  # would need a token with access to this repo), and a missed release should
+  # not sit unpublished. The job exits early when npm already has the version,
+  # so a daily run is a no-op in the normal case.
+  schedule:
+    - cron: '17 5 * * *'
+
 jobs:
   publish:
     runs-on: ubuntu-latest
