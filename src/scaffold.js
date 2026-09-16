@@ -39,15 +39,12 @@ function dekaBinPath(targetDir, platform) {
 // of `deka` that exists is node_modules/.bin/deka (deka#1103 -- the actual
 // bug: deka init's own "Next steps" told people to run `deka dev` and it
 // printed `command not found`). Each package manager has its own idiom for
-// running a devDependency's binary via its `dev` script, plus a direct
-// form that reaches node_modules/.bin without needing a script at all --
-// both are shown so the user isn't stuck if package.json's `dev` script
-// ever changes.
+// running a devDependency's binary via its `dev` script.
 const DEV_STEP_BY_PM = {
-  npm: { run: 'npm run dev', direct: 'npx deka dev' },
-  pnpm: { run: 'pnpm dev', direct: 'pnpm exec deka dev' },
-  yarn: { run: 'yarn dev', direct: 'yarn deka dev' },
-  bun: { run: 'bun dev', direct: 'bunx deka dev' },
+  npm: { run: 'npm run dev' },
+  pnpm: { run: 'pnpm dev' },
+  yarn: { run: 'yarn dev' },
+  bun: { run: 'bun dev' },
 }
 
 // Prints create-deka-app's own "Next steps", replacing deka init's (which
@@ -55,12 +52,21 @@ const DEV_STEP_BY_PM = {
 // (a) doesn't know it's being invoked from the parent directory, so it
 // can't tell the user they still need to `cd <dirName>` first, and (b)
 // always suggests a bare `deka dev`, which is wrong here (see above).
-function printNextSteps(log, dirName, pm) {
+// Commands are green when stdout is a terminal (and NO_COLOR is unset);
+// the step numbers stay plain. Nothing else is decorated -- two commands,
+// one per line, exactly as the user should type them.
+const GREEN = '\u001b[32m'
+const RESET = '\u001b[0m'
+export function colorCommands(env = process.env, isTTY = process.stdout.isTTY) {
+  return Boolean(isTTY) && env.NO_COLOR === undefined
+}
+export function printNextSteps(log, dirName, pm, color = colorCommands()) {
   const step = DEV_STEP_BY_PM[pm.name] || DEV_STEP_BY_PM.npm
+  const cmd = (text) => (color ? `${GREEN}${text}${RESET}` : text)
   log('')
   log('  Next steps:')
-  log(`    cd ${dirName}`)
-  log(`    ${step.run}        # or: ${step.direct}`)
+  log(`    1. ${cmd(`cd ${dirName}`)}`)
+  log(`    2. ${cmd(step.run)}`)
 }
 
 // Runs `deka init`, streaming its (filtered) output to `log` line by line
