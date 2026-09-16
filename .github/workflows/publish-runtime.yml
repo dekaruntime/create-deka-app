@@ -89,12 +89,12 @@ jobs:
         with:
           node-version: 22
 
-      # The publish job below runs `npm install -g npm@latest`; this must
+      # The publish job below runs `npm install -g npm@12`; this must
       # test the same npm or it gates a different toolchain than the one
       # that ships.
       - name: Use the same npm the publish job uses
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12
           npm --version
 
       - run: npm ci
@@ -117,6 +117,21 @@ jobs:
     if: github.event_name != 'pull_request' && github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: release
+    # One job per family. A tag / dispatch trigger names one family and the
+    # other matrix leg no-ops (see the trigger step); the hourly schedule
+    # names none, so BOTH legs run -- dsc first, because a deka publish
+    # requires deka's pinned dsc version to already be on npm.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        family: [dsc, deka]
+    # Never two publish jobs at once (a dispatch landing during the hourly
+    # run, say): the second waits. cancel-in-progress stays false so a
+    # running publish is never killed mid-way.
+    concurrency:
+      group: npm-publish
+      cancel-in-progress: false
     permissions:
       contents: write # to push the deka-v*/dsc-v* tag after a successful publish
       id-token: write # OIDC: trusted publishing, no NPM_TOKEN
@@ -124,35 +139,44 @@ jobs:
       - uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
-      # 1. Resolve family + version. Three trigger shapes feed the same
-      #    inputs: a tag push encodes both in GITHUB_REF_NAME, dispatch
-      #    inputs are explicit, repository_dispatch encodes family in the
-      #    event type and carries an optional version hint in the payload.
+      # 1. Resolve which family this trigger is about, and the version it
+      #    asks for. Four trigger shapes: a tag push encodes both in
+      #    GITHUB_REF_NAME, dispatch inputs are explicit, repository_dispatch
+      #    encodes the family in the event type (optional version hint in
+      #    the payload), and the hourly schedule names nothing -- it means
+      #    "make sure whatever is on the release hosts is on npm", for both
+      #    families. This job is one matrix leg (matrix.family); a trigger
+      #    that names the OTHER family makes this leg a no-op.
       # ------------------------------------------------------------------
       - name: Resolve family and requested version
         id: trigger
+        env:
+          LEG: ${{ matrix.family }}
         run: |
           set -euo pipefail
+          REQUESTED_VERSION=""
+          WAS_TAG_PUSH=false
           case "${{ github.event_name }}" in
             push)
               TAG="${GITHUB_REF_NAME}"
-              FAMILY="${TAG%%-v*}"
+              NAMED="${TAG%%-v*}"
               REQUESTED_VERSION="${TAG#*-v}"
               WAS_TAG_PUSH=true
               ;;
             workflow_dispatch)
-              FAMILY="${{ inputs.family }}"
+              NAMED="${{ inputs.family }}"
               REQUESTED_VERSION="${{ inputs.version }}"
-              WAS_TAG_PUSH=false
               ;;
             repository_dispatch)
               case "${{ github.event.action }}" in
-                deka-released) FAMILY=deka ;;
-                dsc-released) FAMILY=dsc ;;
+                deka-released) NAMED=deka ;;
+                dsc-released) NAMED=dsc ;;
                 *) echo "::error::unknown repository_dispatch action ${{ github.event.action }}"; exit 1 ;;
               esac
               REQUESTED_VERSION="${{ github.event.client_payload.version }}"
-              WAS_TAG_PUSH=false
+              ;;
+            schedule)
+              NAMED=""   # both families, whatever the release hosts say is current
               ;;
             *)
               echo "::error::unsupported event ${{ github.event_name }}"
@@ -160,20 +184,29 @@ jobs:
               ;;
           esac
 
-          if [ "$FAMILY" != "deka" ] && [ "$FAMILY" != "dsc" ]; then
-            echo "::error::family must be 'deka' or 'dsc', got '$FAMILY'"
+          if [ -n "$NAMED" ] && [ "$NAMED" != "deka" ] && [ "$NAMED" != "dsc" ]; then
+            echo "::error::family must be 'deka' or 'dsc', got '$NAMED'"
             exit 1
           fi
 
+          NOOP=false
+          if [ -n "$NAMED" ] && [ "$NAMED" != "$LEG" ]; then
+            NOOP=true
+            REQUESTED_VERSION=""
+            echo "This trigger is about the $NAMED family; the $LEG leg has nothing to do."
+          fi
+
           {
-            echo "family=$FAMILY"
+            echo "family=$LEG"
+            echo "noop=$NOOP"
             echo "requested_version=$REQUESTED_VERSION"
             echo "was_tag_push=$WAS_TAG_PUSH"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved trigger: family=$FAMILY requested_version=${REQUESTED_VERSION:-<latest>} was_tag_push=$WAS_TAG_PUSH"
+          echo "Resolved trigger: family=$LEG noop=$NOOP requested_version=${REQUESTED_VERSION:-<latest>} was_tag_push=$WAS_TAG_PUSH"
 
       - name: Resolve the version to publish (manifest is the source of truth)
         id: version
+        if: steps.trigger.outputs.noop != 'true'
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           REQUESTED_VERSION: ${{ steps.trigger.outputs.requested_version }}
@@ -210,8 +243,13 @@ jobs:
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           VERSION: ${{ steps.version.outputs.version }}
+          NOOP: ${{ steps.trigger.outputs.noop }}
         run: |
           set -euo pipefail
+          if [ "$NOOP" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           NAMES="@dekaruntime/${FAMILY}-darwin-arm64 @dekaruntime/${FAMILY}-darwin-x64 @dekaruntime/${FAMILY}-linux-x64 @dekaruntime/${FAMILY}"
           if [ "$FAMILY" = "deka" ]; then
             NAMES="$NAMES create-deka-app"
@@ -240,12 +278,14 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       # Trusted publishing needs npm >= 11.5.1; setup-node's Node 22 ships
-      # an older npm. No secret is involved: npm exchanges this workflow's
+      # an older npm. Pinned to a major on purpose: an unpinned @latest
+      # crossed 11 -> 12 mid-session once and changed `npm pack --json`'s
+      # shape under us. Bump the major here deliberately, in a PR. No secret is involved: npm exchanges this workflow's
       # OIDC identity for a short-lived credential at publish time.
       - name: Use an npm that understands trusted publishing
         if: steps.check.outputs.skip != 'true'
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12
           npm --version
 
       # ------------------------------------------------------------------
