@@ -482,3 +482,112 @@ test('resolveLatestRuntimeVersion: falls back to "latest" on empty stdout', () =
   })
   assert.equal(version, 'latest')
 })
+
+// rfd#68 (Release Channels): create-deka-app@X.Y.Z-canary-<sha> must pin
+// @dekaruntime/deka@X.Y.Z-canary-<sha> verbatim -- the exact same lockstep
+// contract as a stable version, just proven against a prerelease string so
+// a regression that mangles/truncates the "-canary-<sha>" suffix (e.g. a
+// naive semver-parse that keeps only X.Y.Z) fails loudly here.
+const CANARY_OWN_VERSION = '0.59.0-canary-d5661ed'
+
+test('resolveRuntimeVersion: pins a canary ownVersion verbatim, suffix and all', () => {
+  const version = resolveRuntimeVersion({ ownVersion: CANARY_OWN_VERSION })
+  assert.equal(version, CANARY_OWN_VERSION)
+})
+
+test("generated package.json pins create-deka-app's own canary version exactly, including the -canary-<sha> suffix", () => {
+  const cwd = tmp('cda-canary-pkgjson-')
+  const calls = []
+
+  createApp({
+    targetArg: 'myapp',
+    cwd,
+    env: {},
+    platform: 'linux',
+    arch: 'x64',
+    ownVersion: CANARY_OWN_VERSION,
+    log: () => {},
+    spawn: makeSpawnStub({ calls }),
+  })
+
+  const pkg = JSON.parse(readFileSync(path.join(cwd, 'myapp', 'package.json'), 'utf8'))
+  assert.equal(
+    pkg.devDependencies[RUNTIME_PACKAGE],
+    CANARY_OWN_VERSION,
+    'a canary create-deka-app must pin the identical canary @dekaruntime/deka version, not a stripped/rounded one'
+  )
+  assert.ok(
+    !calls.some(([cmd, args]) => cmd === 'npm' && args[0] === 'view'),
+    'the happy path must not query the registry at all, canary or not'
+  )
+  rmSync(cwd, { recursive: true, force: true })
+})
+
+test('resolveLatestRuntimeVersion: a canary channel looks up the "canary" dist-tag, never "latest"', () => {
+  const calls = []
+  const version = resolveLatestRuntimeVersion({
+    channel: 'canary',
+    spawn: (cmd, args) => {
+      calls.push([cmd, args])
+      return { status: 0, stdout: '0.59.0-canary-e4f5a6b\n' }
+    },
+    log: () => {},
+  })
+  assert.equal(version, '0.59.0-canary-e4f5a6b')
+  assert.deepEqual(calls, [['npm', ['view', `${RUNTIME_PACKAGE}@canary`, 'version']]])
+})
+
+test('resolveLatestRuntimeVersion: an unreachable registry on the canary channel falls back to the "canary" dist-tag, not "latest"', () => {
+  const version = resolveLatestRuntimeVersion({
+    channel: 'canary',
+    spawn: () => ({ status: 1, stdout: '', stderr: 'network timeout' }),
+    log: () => {},
+  })
+  assert.equal(version, 'canary')
+})
+
+test('a canary create-deka-app whose exact pin fails to install falls back to the canary dist-tag, not latest stable', () => {
+  const cwd = tmp('cda-canary-fallback-')
+  const viewCalls = []
+  const installAttempts = []
+  const CANARY_FALLBACK_VERSION = '0.59.0-canary-e4f5a6b'
+
+  createApp({
+    targetArg: 'myapp',
+    cwd,
+    env: {},
+    platform: 'linux',
+    arch: 'x64',
+    ownVersion: CANARY_OWN_VERSION,
+    log: () => {},
+    spawn: (cmd, args, opts) => {
+      if (cmd === 'npm' && args[0] === 'view') {
+        viewCalls.push(args[1])
+        return { status: 0, stdout: `${CANARY_FALLBACK_VERSION}\n` }
+      }
+      if (cmd === 'npm' && args[0] === 'install') {
+        const pkg = JSON.parse(readFileSync(path.join(opts.cwd, 'package.json'), 'utf8'))
+        const pinned = pkg.devDependencies[RUNTIME_PACKAGE]
+        installAttempts.push(pinned)
+        if (pinned === CANARY_OWN_VERSION) {
+          return { status: 1, stdout: '', stderr: 'ETARGET' }
+        }
+        mkdirSync(path.join(opts.cwd, 'node_modules', '.bin'), { recursive: true })
+        writeFileSync(path.join(opts.cwd, 'node_modules', '.bin', 'deka'), '#!/bin/sh\n')
+        return { status: 0 }
+      }
+      return { status: 0 }
+    },
+  })
+
+  assert.deepEqual(
+    viewCalls,
+    [`${RUNTIME_PACKAGE}@canary`],
+    'the fallback lookup must ask for the canary dist-tag, matching the running (canary) create-deka-app, not latest'
+  )
+  assert.deepEqual(installAttempts, [CANARY_OWN_VERSION, CANARY_FALLBACK_VERSION])
+
+  const pkg = JSON.parse(readFileSync(path.join(cwd, 'myapp', 'package.json'), 'utf8'))
+  assert.equal(pkg.devDependencies[RUNTIME_PACKAGE], CANARY_FALLBACK_VERSION)
+  rmSync(cwd, { recursive: true, force: true })
+})

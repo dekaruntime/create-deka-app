@@ -224,7 +224,11 @@ test('end-to-end: falls back to the registry-resolved version when the exact pin
     `expected a failed install attempt pinning ${ownVersion}; got:\n${log.join('\n')}`
   )
   assert.ok(
-    log.some((line) => line.startsWith(`npm view @dekaruntime/deka version|`)),
+    // rfd#68: the fallback looks up the SAME dist-tag as the running
+    // version's channel -- `latest` here, since this checkout's own
+    // package.json version (a stable "0.0.0" placeholder outside of a
+    // publish run) is on the stable channel.
+    log.some((line) => line.startsWith(`npm view @dekaruntime/deka@latest version|`)),
     `expected the fallback registry lookup to have run; got:\n${log.join('\n')}`
   )
   assert.ok(

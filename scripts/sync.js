@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveManifest, PLATFORMS } from './lib/manifest.js'
 import { downloadAndVerify } from './lib/verify.js'
+import { baseVersionOf } from '../src/channel.js'
 
 // The workflow runs a single ubuntu-latest job (deka#1091: no per-platform
 // build matrix, since nothing is compiled here). Only the linux-x64 binary
@@ -77,12 +78,24 @@ export async function sync(args) {
     }
   }
 
+  // rfd#68: a canary's binary prints the BASE version on --version, never
+  // the "-canary-<sha>" suffix -- promotion republishes the identical
+  // bytes under the plain tag, so the binary itself never learns it was
+  // ever a canary. Smoke-testing against the full requested version would
+  // therefore reject every canary binary; compare against base_version
+  // instead (from the manifest when rfd#68 stamped one, else derived by
+  // stripping the suffix -- see src/channel.js). For a stable version this
+  // is a no-op: base_version == version.
+  const familyBaseVersion = baseVersionOf(args.version, familyManifest)
+  const dscBaseVersion = dscManifest ? baseVersionOf(args.dscVersion, dscManifest) : null
+
   const smokeTests = []
   const nativeFamilyBinary = path.join(args.root, 'npm', `${args.family}-${RUNNER_NATIVE_PLATFORM}`, 'bin', args.family)
   smokeTests.push({
     binary: nativeFamilyBinary,
     version: args.version,
-    output: smokeTestVersion(nativeFamilyBinary, args.version),
+    baseVersion: familyBaseVersion,
+    output: smokeTestVersion(nativeFamilyBinary, familyBaseVersion),
   })
 
   if (dscManifest) {
@@ -90,7 +103,8 @@ export async function sync(args) {
     smokeTests.push({
       binary: nativeDscBinary,
       version: args.dscVersion,
-      output: smokeTestVersion(nativeDscBinary, args.dscVersion),
+      baseVersion: dscBaseVersion,
+      output: smokeTestVersion(nativeDscBinary, dscBaseVersion),
     })
   }
 

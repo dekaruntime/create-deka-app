@@ -53,6 +53,32 @@ pin fails, create-deka-app falls back to the latest published
 `@dekaruntime/deka` version, prints a clear warning, and never leaves a
 nonexistent version pinned in the generated `package.json`.
 
+## Channels
+
+There are two channels, [rfd#68](https://github.com/dekaruntime/rfd/issues/68):
+
+```sh
+npx create-deka-app@latest myapp   # stable (the default)
+npx create-deka-app@canary myapp   # canary
+```
+
+**Stable** (`npx create-deka-app@latest`, or just `npx create-deka-app`) pins
+a plain `X.Y.Z` deka runtime — the default, and what everyone not
+deliberately opting in gets.
+
+**Canary** (`npx create-deka-app@canary`) pins a prerelease version shaped
+`X.Y.Z-canary-<7-char-commit-sha>` (e.g. `0.59.0-canary-d5661ed`) — every
+merge to deka's `main` branch, published immediately, before a human has
+promoted it to stable. Lockstep versioning holds within a channel: a canary
+create-deka-app pins the *matching* canary `@dekaruntime/deka`, never a
+stable one.
+
+A canary's binaries report their **base version** on `deka --version` /
+`dsc --version` — `0.59.0`, never `0.59.0-canary-d5661ed`. Promotion
+republishes the exact same compiled bytes under the plain stable tag, so
+the binary itself never learns it was ever a canary; only the git tag, the
+R2 path and the npm version string say so.
+
 ## Platforms
 
 | Platform | Status |
