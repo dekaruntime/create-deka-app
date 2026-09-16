@@ -1,0 +1,81 @@
+
+> create-deka-app@0.0.6 test
+> node --test test/*.test.js
+
+✔ deka bin.js resolves "deka" by default and "dsc" when invoked as dsc (1.698365ms)
+✔ deka bin.js sets DEKA_DSC to the sibling dsc only for the deka command, and only if present (0.3835ms)
+✔ deka bin.js leaves the environment untouched when no sibling dsc exists (0.159869ms)
+✔ dsc bin.js exposes a main() that runs the dsc family with no dual dispatch (0.121713ms)
+✔ platformKey composes platform and arch (1.826023ms)
+✔ isSupportedPlatform matches exactly the three shipped platforms (0.184274ms)
+✔ unsupportedPlatformMessage names the shipped platforms and the tracking issue (0.238476ms)
+✔ resolvePlatformPackageDir: require.resolve success (0.185457ms)
+✔ resolvePlatformPackageDir: falls back to nested node_modules when require.resolve fails (1.140808ms)
+✔ resolvePlatformPackageDir: returns null when neither resolution finds the package (0.230644ms)
+✔ run(): unsupported platform prints a clear message and exits 1 without spawning (0.476771ms)
+✔ run(): missing platform package prints a clear message and exits 1 (0.318996ms)
+✔ run(): propagates the child exit code verbatim (453.899853ms)
+✔ run(): exit code 0 is propagated (not coerced to a truthy failure) (116.974996ms)
+✔ run(): forwards SIGINT to the child (Ctrl-C during a long-running command reaches it) (1113.073661ms)
+✔ run(): forwards SIGTERM to the child as well (239.122294ms)
+✔ run(): does not leak its SIGINT/SIGTERM listeners after the child exits (115.113338ms)
+✔ npm/deka/launcher-core.js and npm/dsc/launcher-core.js are byte-identical (2.8793ms)
+✔ both bin.js wrappers guard their entry point behind require.main (0.614524ms)
+✔ deka: resolves the real latest.json and release.json manifest (369.570691ms)
+✔ dsc: resolves the real latest/release.json and v<version>/release.json manifest (617.643428ms)
+✔ a binary URL from the real manifest actually serves bytes (ranged GET, no full download) (299.407719ms)
+✔ resolveManifest rejects a manifest whose reported version does not match the requested one (1.046985ms)
+✔ detects npm from npm_config_user_agent (2.83314ms)
+✔ detects pnpm from npm_config_user_agent (0.171879ms)
+✔ detects yarn from npm_config_user_agent (0.162208ms)
+✔ detects bun from npm_config_user_agent (0.148485ms)
+✔ falls back to npm_execpath when npm_config_user_agent is absent (0.245192ms)
+✔ defaults to npm when nothing is detectable (0.140328ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/deka (launcher) (435.231127ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/dsc (launcher) (404.266534ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/deka-darwin-arm64 (ships deka + dsc siblings) (466.587133ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/deka-darwin-x64 (ships deka + dsc siblings) (418.956927ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/deka-linux-x64 (ships deka + dsc siblings) (433.875992ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/dsc-darwin-arm64 (424.01166ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/dsc-darwin-x64 (413.528739ms)
+✔ npm pack --dry-run succeeds for @dekaruntime/dsc-linux-x64 (408.798125ms)
+✔ a platform package with no bin/ has nothing runnable to pack (guards that the fixtures above are load-bearing) (0.278618ms)
+Usage: create-deka-app <directory>
+
+  npx create-deka-app myapp
+/private/var/folders/ww/dcsjdgp14h129c1tvhpmmtlr0000gp/T/cda-e2e-nonempty-wy2cht/myapp already exists and is not empty.
+Choose a different directory, or remove its contents first.
+✔ end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in order (1874.641846ms)
+✔ end-to-end: no argument prints usage and exits non-zero (136.594421ms)
+✔ end-to-end: refuses an existing non-empty directory (124.987439ms)
+✔ no argument: prints usage, exits non-zero, does not touch cwd (6.669255ms)
+✔ unsupported platform: rejected before touching the filesystem (0.975821ms)
+✔ existing non-empty directory is refused with a clear message (1.853357ms)
+✔ existing empty directory is accepted (2.474402ms)
+✔ final output tells the user to cd into the project and gives a runnable dev command (1.532945ms)
+✔ a `cd <dir>` line that disappears from the final output fails this suite (1.833705ms)
+✔ deka init's own bare-command next-steps block is suppressed, not printed alongside ours (1.034801ms)
+✔ install failure surfaces an actionable error and stops before deka init (0.968798ms)
+✔ missing binary after install is reported clearly (1.211955ms)
+✔ generated package.json pins the resolved @dekaruntime/deka version, not create-deka-app's own version (1.604306ms)
+✔ falls back to "latest" in the generated package.json when the registry lookup fails (1.860984ms)
+✔ resolveRuntimeVersion: returns the trimmed version on a successful lookup (0.159997ms)
+✔ resolveRuntimeVersion: falls back to "latest" on a non-zero exit (0.201608ms)
+✔ resolveRuntimeVersion: falls back to "latest" when spawn itself errors (npm missing) (0.133871ms)
+✔ resolveRuntimeVersion: falls back to "latest" on empty stdout (0.106693ms)
+✔ accepts a binary that prints its version on stderr (644.320548ms)
+✔ accepts a binary that prints its version on stdout (609.852202ms)
+✔ rejects a binary reporting the wrong version (894.106358ms)
+✔ rejects a binary that prints nothing (312.227058ms)
+✔ rejects a binary that exits non-zero (302.93116ms)
+✔ downloadAndVerify: a correct sha256 writes the file with the exact bytes served (37.187305ms)
+✔ downloadAndVerify: a deliberately corrupted checksum fails closed -- throws, and leaves nothing on disk (10.976099ms)
+✔ downloadAndVerify: an HTTP error status fails closed with no file written (4.000757ms)
+ℹ tests 64
+ℹ suites 0
+ℹ pass 64
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3609.51179
