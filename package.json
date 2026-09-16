@@ -1,6 +1,6 @@
 {
   "name": "create-deka-app",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Scaffold a new deka app",
   "bin": {
     "create-deka-app": "./index.js"
