@@ -60,16 +60,22 @@ jobs:
       - name: Publish
         run: npm publish --access public
 
+      # A successful `npm publish` can still take several minutes to
+      # propagate to every registry read replica. 10 x 15s (150s) was not
+      # enough in practice -- v0.0.3 published fine but this step still
+      # reported failure. 40 x 15s (~10 minutes) with a log line per
+      # attempt so slow propagation is visible instead of a silent wait.
       - name: Read it back from the registry
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for i in $(seq 1 10); do
+          for i in $(seq 1 40); do
             PUBLISHED="$(npm view create-deka-app@"$VERSION" version 2>/dev/null || true)"
             if [ "$PUBLISHED" = "$VERSION" ]; then
-              echo "create-deka-app@$VERSION is live on npm"
+              echo "create-deka-app@$VERSION is live on npm (attempt $i)"
               exit 0
             fi
+            echo "attempt $i/40: create-deka-app@$VERSION not visible yet, retrying in 15s..."
             sleep 15
           done
-          echo "::error::create-deka-app@$VERSION did not appear on the registry"
+          echo "::error::create-deka-app@$VERSION did not appear on the registry after 40 attempts"
           exit 1

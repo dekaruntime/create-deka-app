@@ -17,11 +17,17 @@ export function run({
   cwd = process.cwd(),
   log = console.log,
   error = console.error,
+  // create-deka-app's own version. Not currently used by createApp -- the
+  // runtime version it pins in the generated package.json is resolved
+  // separately, from the npm registry, since create-deka-app's own 0.0.x
+  // line and @dekaruntime/deka's release line are not in lockstep. Kept
+  // here as the CLI's own version for whatever legitimately needs it
+  // (e.g. a future `--version` flag).
   ownVersion = ownPackageJson.version,
 } = {}) {
   const targetArg = argv[0]
   try {
-    return createApp({ targetArg, cwd, env, ownVersion, log })
+    return createApp({ targetArg, cwd, env, log })
   } catch (err) {
     if (err instanceof ScaffoldError) {
       error(err.message)

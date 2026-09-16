@@ -29,10 +29,19 @@ function dekaBinPath(targetDir, platform) {
   return path.join(targetDir, 'node_modules', '.bin', platform === 'win32' ? 'deka.cmd' : 'deka')
 }
 
+export const RUNTIME_PACKAGE = '@dekaruntime/deka'
+
 // Builds the package.json this package writes into every scaffolded
 // project. Exported so the test suite can assert on it directly without
 // re-deriving the shape.
-export function buildPackageJson(dirName, ownVersion) {
+//
+// `runtimeVersion` must be the @dekaruntime/deka version resolved at
+// scaffold time (see resolveRuntimeVersion below) -- never this package's
+// own version. create-deka-app has its own 0.0.x release line and
+// @dekaruntime/deka tracks deka's releases; the two are not in lockstep
+// and never will be, so passing this package's own version here pins a
+// version of the runtime that may not exist (see deka#1076-era bug).
+export function buildPackageJson(dirName, runtimeVersion) {
   return {
     name: sanitizePackageName(dirName),
     private: true,
@@ -43,9 +52,39 @@ export function buildPackageJson(dirName, ownVersion) {
       start: 'deka start',
     },
     devDependencies: {
-      '@dekaruntime/deka': ownVersion,
+      [RUNTIME_PACKAGE]: runtimeVersion,
     },
   }
+}
+
+// Looks up the latest published @dekaruntime/deka version from the npm
+// registry so the generated package.json pins something that actually
+// exists, rather than assuming it matches create-deka-app's own version.
+//
+// Always shells out to `npm` for this lookup (not the detected package
+// manager) -- npm ships with every Node.js install, so it is available
+// regardless of whether the user ran this via npx, pnpm create, yarn
+// create or bun create, and `npm view` is a read-only registry query with
+// no project-local side effects.
+//
+// Falls back to the "latest" dist-tag -- never to a version we already
+// know is wrong -- if the registry can't be reached (offline, registry
+// outage, etc), and says so via `log` so the fallback is visible.
+export function resolveRuntimeVersion({ spawn = spawnSync, cwd = process.cwd(), log = console.log } = {}) {
+  const result = spawn('npm', ['view', RUNTIME_PACKAGE, 'version'], { cwd, encoding: 'utf8' })
+
+  const version =
+    result && !result.error && result.status === 0 ? String(result.stdout || '').trim() : ''
+
+  if (!version) {
+    log(
+      `> Could not resolve the latest ${RUNTIME_PACKAGE} version from the npm registry ` +
+        '(offline, or the registry is unreachable); pinning "latest" instead.'
+    )
+    return 'latest'
+  }
+
+  return version
 }
 
 /**
@@ -61,7 +100,6 @@ export function createApp({
   targetArg,
   cwd = process.cwd(),
   env = process.env,
-  ownVersion,
   platform = process.platform,
   arch = process.arch,
   spawn = spawnSync,
@@ -96,7 +134,9 @@ export function createApp({
     mkdirSync(targetDir, { recursive: true })
   }
 
-  const pkg = buildPackageJson(path.basename(targetDir), ownVersion)
+  const runtimeVersion = resolveRuntimeVersion({ spawn, cwd: targetDir, log })
+
+  const pkg = buildPackageJson(path.basename(targetDir), runtimeVersion)
   writeFileSync(path.join(targetDir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
 
   const pm = detectPackageManager(env)

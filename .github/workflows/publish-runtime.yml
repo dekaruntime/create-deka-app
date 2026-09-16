@@ -272,6 +272,12 @@ jobs:
       # 7. Read back: fail the run if any of the four packages this run
       #    published did not actually land on the registry.
       # ------------------------------------------------------------------
+      # A successful `npm publish` can still take several minutes to
+      # propagate to every registry read replica. 10 x 15s (150s) was not
+      # enough in practice -- a publish succeeded but this step still
+      # reported failure. 40 x 15s (~10 minutes) per package, with a log
+      # line per attempt so slow propagation is visible instead of a
+      # silent wait.
       - name: Read back from the registry
         if: steps.check.outputs.skip != 'true'
         env:
@@ -282,17 +288,18 @@ jobs:
           for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
             NAME="@dekaruntime/${pkg}"
             OK=false
-            for i in $(seq 1 10); do
+            for i in $(seq 1 40); do
               PUBLISHED="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
               if [ "$PUBLISHED" = "$VERSION" ]; then
-                echo "${NAME}@${VERSION} is live on npm"
+                echo "${NAME}@${VERSION} is live on npm (attempt $i)"
                 OK=true
                 break
               fi
+              echo "attempt $i/40: ${NAME}@${VERSION} not visible yet, retrying in 15s..."
               sleep 15
             done
             if [ "$OK" != "true" ]; then
-              echo "::error::${NAME}@${VERSION} did not appear on the registry"
+              echo "::error::${NAME}@${VERSION} did not appear on the registry after 40 attempts"
               exit 1
             fi
           done
