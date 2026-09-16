@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { detectPackageManager } from './package-manager.js'
 import { isSupportedPlatform, platformKey } from './platform.js'
+import { versionChannel, distTagFor } from './channel.js'
 
 // Thrown for every expected failure. `message` is written straight to
 // stderr, so it always says what happened and what to do about it.
@@ -104,21 +105,33 @@ export function buildPackageJson(dirName, runtimeVersion) {
 // create or bun create, and `npm view` is a read-only registry query with
 // no project-local side effects.
 //
-// Falls back to the "latest" dist-tag -- never to a version we already
-// know is wrong -- if the registry can't be reached (offline, registry
-// outage, etc), and says so via `log` so the fallback is visible.
-export function resolveLatestRuntimeVersion({ spawn = spawnSync, cwd = process.cwd(), log = console.log } = {}) {
-  const result = spawn('npm', ['view', RUNTIME_PACKAGE, 'version'], { cwd, encoding: 'utf8' })
+// Falls back to the running version's OWN channel's dist-tag -- never to a
+// version we already know is wrong, and never silently to `latest` for a
+// canary -- if the registry can't be reached (offline, registry outage,
+// etc), and says so via `log` so the fallback is visible.
+//
+// rfd#68: `channel` is the channel of the create-deka-app version that is
+// running (see resolveRuntimeVersion / createApp below) -- `canary` looks
+// up `@dekaruntime/deka@canary`, so `npx create-deka-app@canary myapp`
+// falls back onto another canary build, never quietly onto `latest` stable.
+export function resolveLatestRuntimeVersion({
+  spawn = spawnSync,
+  cwd = process.cwd(),
+  log = console.log,
+  channel = 'stable',
+} = {}) {
+  const distTag = distTagFor(channel)
+  const result = spawn('npm', ['view', `${RUNTIME_PACKAGE}@${distTag}`, 'version'], { cwd, encoding: 'utf8' })
 
   const version =
     result && !result.error && result.status === 0 ? String(result.stdout || '').trim() : ''
 
   if (!version) {
     log(
-      `> Could not resolve the latest ${RUNTIME_PACKAGE} version from the npm registry ` +
-        '(offline, or the registry is unreachable); pinning "latest" instead.'
+      `> Could not resolve the ${distTag} ${RUNTIME_PACKAGE} version from the npm registry ` +
+        `(offline, or the registry is unreachable); pinning "${distTag}" instead.`
     )
-    return 'latest'
+    return distTag
   }
 
   return version
@@ -234,7 +247,7 @@ export function createApp({
         `This can happen when create-deka-app@${ownVersion} shipped before its matching runtime build did. ` +
         'Falling back to the latest published version instead.'
     )
-    const fallbackVersion = resolveLatestRuntimeVersion({ spawn, cwd: targetDir, log })
+    const fallbackVersion = resolveLatestRuntimeVersion({ spawn, cwd: targetDir, log, channel: versionChannel(ownVersion) })
     if (fallbackVersion === runtimeVersion) {
       throw new ScaffoldError(
         `"${pm.name} install" failed in ${targetDir} (exit code ${install.status}), ` +

@@ -36,10 +36,26 @@
 # publish step failing after the other 8 packages already reached `latest`)
 # must not be skipped forever by the next run. The "already published"
 # check below only skips when EVERY package in this run's set is already at
-# `latest` == VERSION, and every publish step below tolerates its own
-# package already sitting at the exact VERSION on the registry (npm's
-# "cannot publish over the previously published versions" refusal) by
-# treating that as "already done" instead of failing the job.
+# its channel's dist-tag == VERSION, and every publish step below tolerates
+# its own package already sitting at the exact VERSION on the registry
+# (npm's "cannot publish over the previously published versions" refusal)
+# by treating that as "already done" instead of failing the job.
+#
+# Channels (rfd#68, https://github.com/dekaruntime/rfd/issues/68): a
+# version is on the "canary" channel when it carries a `-canary-<sha>`
+# prerelease suffix (e.g. `0.59.0-canary-d5661ed`); anything else is
+# "stable". CHANNEL is derived from VERSION wherever VERSION is already
+# known (a tag push, a dispatch), and drives: which npm dist-tag a publish
+# uses (`--tag canary` vs the implicit `latest`), which dist-tag the
+# idempotency check and "Verify latest" compare against
+# (dist-tags.canary vs dist-tags.latest), and -- for the hourly schedule
+# leg, which names no version -- which pointer file resolves one
+# (canary.json / canary/release.json vs latest.json / latest/release.json).
+# The per-version R2 path shape itself does NOT change between channels
+# (scripts/lib/manifest.js): deka's has never had a "v" prefix, dsc's has
+# always had one, and both simply carry the full version string, canary
+# suffix included. A missing canary pointer (404) means "no canary has
+# been cut for this family yet" and is skipped quietly, not a failure.
 name: publish-runtime
 
 on:
@@ -57,7 +73,7 @@ on:
         type: choice
         options: [deka, dsc]
       version:
-        description: 'Version to publish (blank = resolve from latest.json)'
+        description: 'Version to publish (blank = resolve stable from latest.json). Accepts a leading "v" or not, and either channel: "0.53.4" or "0.59.0-canary-d5661ed".'
         required: false
         type: string
 
@@ -67,6 +83,12 @@ on:
   # so a daily run is a no-op in the normal case.
   # Sent by deka's and dsc's release workflows via CASCADE_DISPATCH_TOKEN, so a
   # release publishes immediately instead of waiting for the hourly check.
+  # rfd#68: the payload is now `{tag, channel}` (VERSION is derived from
+  # `tag`, stripping a leading "v"); the old `version` key keeps working for
+  # a sender that hasn't switched yet. `channel` in the payload is accepted
+  # but not trusted -- CHANNEL is always re-derived from the resolved
+  # VERSION string below, so a stale or wrong payload channel can't desync
+  # from what actually gets published.
   repository_dispatch:
     types: [deka-released, dsc-released]
 
@@ -108,8 +130,43 @@ jobs:
           fi
           grep -qi 'usage' usage.txt || { echo "::error::expected a usage message"; cat usage.txt; exit 1; }
 
+  # Computes the (family, channel) pairs `publish`'s matrix below runs.
+  # Every trigger except the hourly schedule already names exactly one
+  # family (a tag push, a dispatch payload, or an explicit workflow_dispatch
+  # input) and -- once its version is resolved -- exactly one channel; that
+  # channel is derived from the version string inside `publish` itself
+  # (VERSION isn't known yet here), so those triggers get the same
+  # two-entry, family-only matrix this repo has always used: dsc then deka,
+  # with whichever leg the trigger didn't name becoming a no-op (unchanged
+  # behavior, just no longer a hardcoded `strategy:` list).
+  #
+  # The schedule leg alone names no version, and rfd#68 gives each family
+  # two independent pointers to check -- latest.json / latest/release.json
+  # for stable, canary.json / canary/release.json for canary -- so it
+  # expands to four entries, one per (family, channel) pair, each resolved
+  # and published independently (a missing canary pointer just no-ops that
+  # one entry). Order matters: a dsc must land before the deka that pins
+  # it, so each channel's dsc precedes that channel's deka.
+  plan:
+    if: github.event_name != 'pull_request' && github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Compute the (family, channel) matrix for this trigger
+        id: matrix
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            ENTRIES='[{"family":"dsc","channel":"stable"},{"family":"deka","channel":"stable"},{"family":"dsc","channel":"canary"},{"family":"deka","channel":"canary"}]'
+          else
+            ENTRIES='[{"family":"dsc","channel":""},{"family":"deka","channel":""}]'
+          fi
+          echo "matrix={\"include\":$ENTRIES}" >> "$GITHUB_OUTPUT"
+          echo "Matrix for event '${{ github.event_name }}': $ENTRIES"
+
   publish:
-    needs: test
+    needs: [test, plan]
     # Only the events that actually mean "publish": a deka-v*/dsc-v* tag
     # push, repository_dispatch, schedule (the hourly fallback check), or a
     # manual workflow_dispatch. Never a pull_request, and never a plain push
@@ -117,15 +174,15 @@ jobs:
     if: github.event_name != 'pull_request' && github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: release
-    # One job per family. A tag / dispatch trigger names one family and the
-    # other matrix leg no-ops (see the trigger step); the hourly schedule
-    # names none, so BOTH legs run -- dsc first, because a deka publish
-    # requires deka's pinned dsc version to already be on npm.
+    # One job per (family, channel) pair -- see the `plan` job above for how
+    # that list is built per trigger. A tag / dispatch trigger names one
+    # family and the leg(s) for the other family no-op (see the trigger
+    # step); the hourly schedule names none, so all four (family, channel)
+    # entries run, dsc before deka within each channel.
     strategy:
       fail-fast: false
       max-parallel: 1
-      matrix:
-        family: [dsc, deka]
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     # Never two publish jobs at once (a dispatch landing during the hourly
     # run, say): the second waits. cancel-in-progress stays false so a
     # running publish is never killed mid-way.
@@ -142,16 +199,19 @@ jobs:
       # 1. Resolve which family this trigger is about, and the version it
       #    asks for. Four trigger shapes: a tag push encodes both in
       #    GITHUB_REF_NAME, dispatch inputs are explicit, repository_dispatch
-      #    encodes the family in the event type (optional version hint in
-      #    the payload), and the hourly schedule names nothing -- it means
-      #    "make sure whatever is on the release hosts is on npm", for both
-      #    families. This job is one matrix leg (matrix.family); a trigger
-      #    that names the OTHER family makes this leg a no-op.
+      #    encodes the family in the event type (tag/version hint in the
+      #    payload), and the hourly schedule names nothing for family OR
+      #    version -- the `plan` job above already pinned this leg's family
+      #    AND channel (matrix.channel), so this leg resolves its own
+      #    version from that channel's pointer file below. This job is one
+      #    matrix leg (matrix.family, matrix.channel); a trigger that names
+      #    a different family makes this leg a no-op.
       # ------------------------------------------------------------------
       - name: Resolve family and requested version
         id: trigger
         env:
           LEG: ${{ matrix.family }}
+          LEG_CHANNEL: ${{ matrix.channel }}
         run: |
           set -euo pipefail
           REQUESTED_VERSION=""
@@ -165,7 +225,10 @@ jobs:
               ;;
             workflow_dispatch)
               NAMED="${{ inputs.family }}"
+              # Accepts a version with or without a leading "v", either
+              # channel form.
               REQUESTED_VERSION="${{ inputs.version }}"
+              REQUESTED_VERSION="${REQUESTED_VERSION#v}"
               ;;
             repository_dispatch)
               case "${{ github.event.action }}" in
@@ -173,10 +236,17 @@ jobs:
                 dsc-released) NAMED=dsc ;;
                 *) echo "::error::unknown repository_dispatch action ${{ github.event.action }}"; exit 1 ;;
               esac
-              REQUESTED_VERSION="${{ github.event.client_payload.version }}"
+              PAYLOAD_TAG="${{ github.event.client_payload.tag }}"
+              if [ -n "$PAYLOAD_TAG" ]; then
+                REQUESTED_VERSION="${PAYLOAD_TAG#v}"
+              else
+                REQUESTED_VERSION="${{ github.event.client_payload.version }}"
+              fi
               ;;
             schedule)
-              NAMED=""   # both families, whatever the release hosts say is current
+              # The plan job already pinned this leg's family (and channel,
+              # via LEG_CHANNEL below) -- never "both run" implicitly.
+              NAMED="$LEG"
               ;;
             *)
               echo "::error::unsupported event ${{ github.event_name }}"
@@ -200,9 +270,10 @@ jobs:
             echo "family=$LEG"
             echo "noop=$NOOP"
             echo "requested_version=$REQUESTED_VERSION"
+            echo "requested_channel=$LEG_CHANNEL"
             echo "was_tag_push=$WAS_TAG_PUSH"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved trigger: family=$LEG noop=$NOOP requested_version=${REQUESTED_VERSION:-<latest>} was_tag_push=$WAS_TAG_PUSH"
+          echo "Resolved trigger: family=$LEG noop=$NOOP requested_version=${REQUESTED_VERSION:-<none>} requested_channel=${LEG_CHANNEL:-<derived-from-version>} was_tag_push=$WAS_TAG_PUSH"
 
       - name: Resolve the version to publish (manifest is the source of truth)
         id: version
@@ -210,57 +281,106 @@ jobs:
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           REQUESTED_VERSION: ${{ steps.trigger.outputs.requested_version }}
+          REQUESTED_CHANNEL: ${{ steps.trigger.outputs.requested_channel }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
+          SKIP=false
+          VERSION=""
+
           if [ -n "$REQUESTED_VERSION" ]; then
             VERSION="$REQUESTED_VERSION"
+          elif [ "$EVENT" = "schedule" ]; then
+            # No explicit version: resolve the pointer file for the channel
+            # this matrix entry owns. canary.json / canary/release.json may
+            # not exist yet (no canary has been cut for this family) -- a
+            # 404 there means "nothing to do", not a failure.
+            if [ "$FAMILY" = "deka" ]; then
+              if [ "$REQUESTED_CHANNEL" = "canary" ]; then POINTER_URL="https://releases.deka.gg/canary.json"; else POINTER_URL="https://releases.deka.gg/latest.json"; fi
+            else
+              if [ "$REQUESTED_CHANNEL" = "canary" ]; then POINTER_URL="https://dsc-wasm.deka.gg/canary/release.json"; else POINTER_URL="https://dsc-wasm.deka.gg/latest/release.json"; fi
+            fi
+            HTTP_CODE="$(curl -sS -o "$RUNNER_TEMP/pointer.json" -w '%{http_code}' "$POINTER_URL")"
+            if [ "$HTTP_CODE" = "404" ]; then
+              echo "No $REQUESTED_CHANNEL channel published yet for $FAMILY ($POINTER_URL -> 404); skipping quietly."
+              SKIP=true
+            elif [ "$HTTP_CODE" != "200" ]; then
+              echo "::error::GET $POINTER_URL -> $HTTP_CODE"
+              exit 1
+            else
+              VERSION="$(jq -r '.version' "$RUNNER_TEMP/pointer.json")"
+            fi
           elif [ "$FAMILY" = "deka" ]; then
             VERSION="$(curl -fsSL https://releases.deka.gg/latest.json | jq -r '.version')"
           else
             VERSION="$(curl -fsSL https://dsc-wasm.deka.gg/latest/release.json | jq -r '.version')"
           fi
-          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo "::error::could not resolve a version to publish for family $FAMILY"
-            exit 1
+
+          CHANNEL=""
+          if [ "$SKIP" != "true" ]; then
+            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+              echo "::error::could not resolve a version to publish for family $FAMILY"
+              exit 1
+            fi
+            case "$VERSION" in
+              *-canary-*) CHANNEL=canary ;;
+              *) CHANNEL=stable ;;
+            esac
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Publishing $FAMILY@$VERSION"
+
+          {
+            echo "skip=$SKIP"
+            echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$SKIP" = "true" ]; then
+            echo "Nothing to publish for $FAMILY on this leg."
+          else
+            echo "Publishing $FAMILY@$VERSION ($CHANNEL)"
+          fi
 
       # ------------------------------------------------------------------
       # 2. Idempotency: exit 0 if this run's ENTIRE package set is already
-      #    fully published (every one of them at dist-tags.latest ==
-      #    VERSION). Checking only the launcher package here was the bug:
+      #    fully published (every one of them at this channel's dist-tag ==
+      #    VERSION: dist-tags.canary for canary, dist-tags.latest for
+      #    stable). Checking only the launcher package here was the bug:
       #    a half-completed run -- say, create-deka-app's publish step
-      #    failing after all 8 runtime packages already reached `latest`
-      #    -- left @dekaruntime/${FAMILY} at VERSION, so this step kept
-      #    reporting skip=true forever and create-deka-app never got
-      #    another chance to publish. Skip only when EVERY package in the
-      #    set is done; otherwise resume the run (individual publish steps
-      #    below no-op for whichever packages already made it).
+      #    failing after all 8 runtime packages already reached the
+      #    channel's dist-tag -- left @dekaruntime/${FAMILY} there, so this
+      #    step kept reporting skip=true forever and create-deka-app never
+      #    got another chance to publish. Skip only when EVERY package in
+      #    the set is done; otherwise resume the run (individual publish
+      #    steps below no-op for whichever packages already made it). A
+      #    schedule leg whose pointer 404'd (steps.version.outputs.skip)
+      #    also short-circuits here, same as a family-mismatch no-op.
       # ------------------------------------------------------------------
       - name: Check whether this version is already published
         id: check
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
           NOOP: ${{ steps.trigger.outputs.noop }}
+          VERSION_SKIP: ${{ steps.version.outputs.skip }}
         run: |
           set -euo pipefail
-          if [ "$NOOP" = "true" ]; then
+          if [ "$NOOP" = "true" ] || [ "$VERSION_SKIP" = "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          DIST_TAG="latest"
+          if [ "$CHANNEL" = "canary" ]; then DIST_TAG="canary"; fi
           NAMES="@dekaruntime/${FAMILY}-darwin-arm64 @dekaruntime/${FAMILY}-darwin-x64 @dekaruntime/${FAMILY}-linux-x64 @dekaruntime/${FAMILY}"
           if [ "$FAMILY" = "deka" ]; then
             NAMES="$NAMES create-deka-app"
           fi
           ALL_DONE=true
           for NAME in $NAMES; do
-            LATEST="$(npm view "${NAME}" dist-tags.latest 2>/dev/null || true)"
-            if [ "$LATEST" = "$VERSION" ]; then
-              echo "${NAME}@${VERSION} is already latest on npm."
+            CURRENT="$(npm view "${NAME}" "dist-tags.${DIST_TAG}" 2>/dev/null || true)"
+            if [ "$CURRENT" = "$VERSION" ]; then
+              echo "${NAME}@${VERSION} is already ${DIST_TAG} on npm."
             else
-              echo "${NAME} is not yet at ${VERSION} latest (currently: ${LATEST:-<none>})."
+              echo "${NAME} is not yet at ${VERSION} ${DIST_TAG} (currently: ${CURRENT:-<none>})."
               ALL_DONE=false
             fi
           done
@@ -291,6 +411,11 @@ jobs:
       # ------------------------------------------------------------------
       # 3. deka's bundled dsc must be the version deka pins, and that dsc
       #    version must already be on npm (publish dsc first otherwise).
+      #    Works unchanged for a canary VERSION: the git ref "v${VERSION}"
+      #    below is exactly deka's own release tag, canary suffix included
+      #    (rfd#68: `vX.Y.Z-canary-<sha>`), and a canary deka may pin a
+      #    canary dsc -- this only checks that whatever it pins is already
+      #    published, not which channel that dsc version is on.
       # ------------------------------------------------------------------
       - name: Resolve deka's pinned dsc version
         id: dsc_pin
@@ -324,6 +449,11 @@ jobs:
       # 4. Download into npm/<pkg>/bin/, verify every sha256, chmod +x, and
       #    smoke-test the runner-native binary. Fails closed: any checksum
       #    mismatch or missing manifest entry throws (scripts/lib/verify.js).
+      #    scripts/sync.js resolves the right R2 URLs and smoke-tests
+      #    against the manifest's base_version internally (rfd#68: a
+      #    canary's binary reports its base version, never the
+      #    "-canary-<sha>" suffix) -- VERSION is simply the full version
+      #    string, canary suffix included; nothing here needs CHANNEL.
       # ------------------------------------------------------------------
       - name: Download and verify binaries
         if: steps.check.outputs.skip != 'true'
@@ -341,7 +471,8 @@ jobs:
 
       # ------------------------------------------------------------------
       # 5. Stamp the real version into package.json, in the working tree
-      #    only -- nothing here is ever committed.
+      #    only -- nothing here is ever committed. Unaffected by channel:
+      #    VERSION/DSC_VERSION are stamped verbatim, canary suffix and all.
       # ------------------------------------------------------------------
       - name: Stamp versions
         if: steps.check.outputs.skip != 'true'
@@ -370,7 +501,8 @@ jobs:
 
             # Lockstep versioning: create-deka-app@VERSION pins
             # @dekaruntime/deka@VERSION directly (see src/scaffold.js) --
-            # stamping its version here is what makes that true.
+            # stamping its version here is what makes that true, canary or
+            # stable.
             jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
           fi
 
@@ -387,6 +519,12 @@ jobs:
       #     left in any dependency, the tarball packs (same validation as
       #     publish, offline), and a platform package's tarball actually
       #     contains its binaries.
+      #
+      #     The placeholder check below (`^0\.0\.0`) already accepts a
+      #     canary version unmodified: "X.Y.Z-canary-<sha>" only matches
+      #     that pattern when X.Y.Z is itself "0.0.0" -- the actual
+      #     placeholder this guards against -- so no channel-specific
+      #     change is needed here.
       # ------------------------------------------------------------------
       - name: Pre-flight every package before the first publish
         if: steps.check.outputs.skip != 'true'
@@ -435,36 +573,43 @@ jobs:
       # 6. Publish: platform packages first, launcher last. Trusted
       #    publishing (OIDC) -- no NPM_TOKEN, no ~/.npmrc, no --provenance
       #    flag (provenance is automatic for a public package from a
-      #    public repo).
+      #    public repo). rfd#68: a canary VERSION publishes under the
+      #    explicit `canary` dist-tag (npm refuses a prerelease version
+      #    with no explicit tag anyway); a stable VERSION is unchanged --
+      #    npm's implicit `latest` tag.
       # ------------------------------------------------------------------
       - name: Publish platform packages
         if: steps.check.outputs.skip != 'true'
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           set -euo pipefail
-          # Published straight to `latest`. The OIDC credential that trusted
-          # publishing mints is good for `npm publish` ONLY -- it cannot run
-          # `npm dist-tag add` (E401), so a publish-to-`next`-then-promote
-          # scheme is impossible without a stored token. The publish ORDER
-          # is the safety instead: platform packages first, the launcher
-          # (which pins them at this exact version) after they are read
-          # back, and create-deka-app last. A mid-run failure leaves the
-          # previous launcher as `latest`, still installable.
+          # Published straight to the channel's dist-tag. The OIDC
+          # credential that trusted publishing mints is good for `npm
+          # publish` ONLY -- it cannot run `npm dist-tag add` (E401), so a
+          # publish-to-`next`-then-promote scheme is impossible without a
+          # stored token. The publish ORDER is the safety instead: platform
+          # packages first, the launcher (which pins them at this exact
+          # version) after they are read back, and create-deka-app last. A
+          # mid-run failure leaves the previous launcher as the channel's
+          # dist-tag, still installable.
           #
           # Resumable: a prior run of this job can have already published
           # some of these packages before failing later on (e.g. on
           # create-deka-app below). `npm publish` refuses to publish over a
           # version that already exists (E403 EPUBLISHCONFLICT), so check
           # first and skip instead of letting that refusal fail the job.
+          NPM_TAG_ARGS=()
+          if [ "$CHANNEL" = "canary" ]; then NPM_TAG_ARGS=(--tag canary); fi
           for platform in darwin-arm64 darwin-x64 linux-x64; do
             NAME="@dekaruntime/${FAMILY}-${platform}"
             ON_REGISTRY="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
             if [ "$ON_REGISTRY" = "$VERSION" ]; then
               echo "${NAME}@${VERSION} already on registry, skipping publish"
             else
-              (cd "npm/${FAMILY}-${platform}" && npm publish --access public)
+              (cd "npm/${FAMILY}-${platform}" && npm publish --access public "${NPM_TAG_ARGS[@]}")
             fi
           done
 
@@ -473,14 +618,17 @@ jobs:
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           set -euo pipefail
+          NPM_TAG_ARGS=()
+          if [ "$CHANNEL" = "canary" ]; then NPM_TAG_ARGS=(--tag canary); fi
           NAME="@dekaruntime/${FAMILY}"
           ON_REGISTRY="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
           if [ "$ON_REGISTRY" = "$VERSION" ]; then
             echo "${NAME}@${VERSION} already on registry, skipping publish"
           else
-            (cd "npm/${FAMILY}" && npm publish --access public)
+            (cd "npm/${FAMILY}" && npm publish --access public "${NPM_TAG_ARGS[@]}")
           fi
 
       # create-deka-app publishes last, after the deka launcher -- lockstep
@@ -490,18 +638,23 @@ jobs:
         if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           set -euo pipefail
+          NPM_TAG_ARGS=()
+          if [ "$CHANNEL" = "canary" ]; then NPM_TAG_ARGS=(--tag canary); fi
           ON_REGISTRY="$(npm view "create-deka-app@${VERSION}" version 2>/dev/null || true)"
           if [ "$ON_REGISTRY" = "$VERSION" ]; then
             echo "create-deka-app@${VERSION} already on registry, skipping publish"
           else
-            npm publish --access public
+            npm publish --access public "${NPM_TAG_ARGS[@]}"
           fi
 
       # ------------------------------------------------------------------
       # 7. Read back: fail the run if any of the packages this run
-      #    published did not actually land on the registry.
+      #    published did not actually land on the registry. Checking a
+      #    specific version's existence is dist-tag-agnostic, so this step
+      #    is unaffected by channel.
       # ------------------------------------------------------------------
       # A successful `npm publish` can still take several minutes to
       # propagate to every registry read replica. 10 x 15s (150s) was not
@@ -543,34 +696,41 @@ jobs:
           done
 
       # ------------------------------------------------------------------
-      # 7b. `latest` must now point at VERSION for every package this run
-      #     owns. Read-only (`npm view`), so it needs no credential; it is
-      #     what the resumable check at the top keys on next time.
+      # 7b. This run's channel dist-tag (canary or latest) must now point
+      #     at VERSION for every package this run owns. Read-only (`npm
+      #     view`), so it needs no credential; it is what the resumable
+      #     check at the top keys on next time.
       # ------------------------------------------------------------------
       - name: Verify latest
         if: steps.check.outputs.skip != 'true'
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           set -euo pipefail
+          DIST_TAG="latest"
+          if [ "$CHANNEL" = "canary" ]; then DIST_TAG="canary"; fi
           NAMES="@dekaruntime/${FAMILY}-darwin-arm64 @dekaruntime/${FAMILY}-darwin-x64 @dekaruntime/${FAMILY}-linux-x64 @dekaruntime/${FAMILY}"
           if [ "$FAMILY" = "deka" ]; then
             NAMES="$NAMES create-deka-app"
           fi
           for NAME in $NAMES; do
-            ACTUAL="$(npm view "${NAME}" dist-tags.latest 2>/dev/null || true)"
+            ACTUAL="$(npm view "${NAME}" "dist-tags.${DIST_TAG}" 2>/dev/null || true)"
             if [ "$ACTUAL" != "$VERSION" ]; then
-              echo "::error::${NAME} latest is ${ACTUAL:-<none>}, expected ${VERSION}"
+              echo "::error::${NAME} ${DIST_TAG} is ${ACTUAL:-<none>}, expected ${VERSION}"
               exit 1
             fi
-            echo "${NAME} latest = ${VERSION}"
+            echo "${NAME} ${DIST_TAG} = ${VERSION}"
           done
 
       # ------------------------------------------------------------------
       # 8. Tag the publishing commit, unless the trigger was already a tag
       #    push. The repo stays pristine -- this is the only git write in
       #    the whole job, and only after a verified successful publish.
+      #    VERSION already carries the canary suffix when there is one, so
+      #    this produces e.g. "deka-v0.59.0-canary-d5661ed" with no change
+      #    needed here.
       # ------------------------------------------------------------------
       - name: Tag the publishing commit
         if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.was_tag_push != 'true'

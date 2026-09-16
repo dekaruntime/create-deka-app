@@ -1,26 +1,39 @@
 // Resolves deka/dsc release manifests. Both hosts are public and need no
-// token to read (deka#1091). The two families use different URL shapes:
+// token to read (deka#1091). rfd#68 (Release Channels) gives each family a
+// second pointer file for the newest canary, alongside the existing
+// "latest" pointer -- the per-version path shape is UNCHANGED and applies
+// to the full version string as-is, canary suffix and all, for both
+// channels (deka has never used a "v" prefix there; dsc has always used
+// one):
 //
-//   deka: https://releases.deka.gg/latest.json                (version hint)
-//         https://releases.deka.gg/<version>/release.json     (no "v")
+//   deka: https://releases.deka.gg/latest.json                  (stable pointer)
+//         https://releases.deka.gg/canary.json                  (newest-canary pointer)
+//         https://releases.deka.gg/<version>/release.json       (no "v", either channel)
 //         https://releases.deka.gg/<version>/deka-<platform>
 //
-//   dsc:  https://dsc-wasm.deka.gg/latest/release.json
-//         https://dsc-wasm.deka.gg/v<version>/release.json    (with "v")
+//   dsc:  https://dsc-wasm.deka.gg/latest/release.json           (stable pointer)
+//         https://dsc-wasm.deka.gg/canary/release.json           (newest-canary pointer)
+//         https://dsc-wasm.deka.gg/v<version>/release.json       (with "v", either channel)
 //         https://dsc-wasm.deka.gg/v<version>/dsc-<platform>
+//
+// e.g. deka canary: releases.deka.gg/0.59.0-canary-d5661ed/release.json
+//      dsc canary:   dsc-wasm.deka.gg/v0.58.3-canary-a1b2c3d/release.json
+import { versionChannel } from '../../src/channel.js'
 
 export const PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-x64']
 
 const FAMILIES = {
   deka: {
     binaryName: 'deka',
-    latestUrl: 'https://releases.deka.gg/latest.json',
+    latestUrl: (channel) =>
+      channel === 'canary' ? 'https://releases.deka.gg/canary.json' : 'https://releases.deka.gg/latest.json',
     manifestUrl: (version) => `https://releases.deka.gg/${version}/release.json`,
     binaryUrl: (version, name) => `https://releases.deka.gg/${version}/${name}`,
   },
   dsc: {
     binaryName: 'dsc',
-    latestUrl: 'https://dsc-wasm.deka.gg/latest/release.json',
+    latestUrl: (channel) =>
+      channel === 'canary' ? 'https://dsc-wasm.deka.gg/canary/release.json' : 'https://dsc-wasm.deka.gg/latest/release.json',
     manifestUrl: (version) => `https://dsc-wasm.deka.gg/v${version}/release.json`,
     binaryUrl: (version, name) => `https://dsc-wasm.deka.gg/v${version}/${name}`,
   },
@@ -42,13 +55,19 @@ export async function fetchJson(url, fetchImpl = fetch) {
   return res.json()
 }
 
-// Resolves the latest published version for a family, straight from
-// latest.json / latest/release.json.
-export async function resolveLatestVersion(family, fetchImpl = fetch) {
+// Resolves the newest published version for a family on one channel,
+// straight from that channel's pointer file: latest.json / latest/release.json
+// for "stable" (the default, unchanged from pre-rfd#68 behavior), canary.json
+// / canary/release.json for "canary". Callers that need "no canary yet" to
+// be a quiet no-op (the schedule leg) check the HTTP status themselves
+// (scripts/lib/manifest.js has no opinion on that -- fetchJson always
+// throws on a non-ok response, 404 included).
+export async function resolveLatestVersion(family, channel = 'stable', fetchImpl = fetch) {
   const config = familyConfig(family)
-  const latest = await fetchJson(config.latestUrl, fetchImpl)
+  const url = config.latestUrl(channel)
+  const latest = await fetchJson(url, fetchImpl)
   if (!latest || typeof latest.version !== 'string' || !latest.version) {
-    throw new Error(`${config.latestUrl} did not return a "version" field`)
+    throw new Error(`${url} did not return a "version" field`)
   }
   return latest.version
 }
@@ -82,11 +101,22 @@ export async function resolveManifest(family, version, fetchImpl = fetch) {
     }
   }
 
-  return { family, version, binaries }
+  // rfd#68 manifests carry `base_version` (what the binary's own --version
+  // actually reports -- see src/channel.js) and `channel`; a manifest from
+  // before rfd#68 has neither, and callers fall back accordingly
+  // (baseVersionOf in src/channel.js).
+  return {
+    family,
+    version,
+    channel: typeof manifest.channel === 'string' ? manifest.channel : versionChannel(version),
+    base_version: typeof manifest.base_version === 'string' ? manifest.base_version : undefined,
+    binaries,
+  }
 }
 
-// Convenience: resolve the latest version and its manifest in one call.
-export async function resolveLatest(family, fetchImpl = fetch) {
-  const version = await resolveLatestVersion(family, fetchImpl)
+// Convenience: resolve the newest version on a channel and its manifest in
+// one call.
+export async function resolveLatest(family, channel = 'stable', fetchImpl = fetch) {
+  const version = await resolveLatestVersion(family, channel, fetchImpl)
   return resolveManifest(family, version, fetchImpl)
 }
