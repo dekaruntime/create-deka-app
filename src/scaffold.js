@@ -43,20 +43,25 @@ function stripDekaNextSteps(output) {
   return cutIndex === -1 ? String(output) : lines.slice(0, cutIndex).join('\n')
 }
 
-// deka init's own next-steps text always tells the user to run a bare
-// `deka ...` command, because that's correct advice for someone who ran
-// `deka init` by hand with deka already on their PATH. It is wrong advice
-// here: create-deka-app only ever installs deka into this project's own
-// node_modules/.bin, so a bare `deka` command fails for a user who has no
-// global install. We suppress deka's block (stripDekaNextSteps) and print
-// our own -- the `cd` line plus the detected package manager's own idiom
-// for running the "dev" script already sitting in package.json, which
-// works with nothing beyond what the install step just put on disk.
-function printNextSteps(log, dirName, pm) {
+// deka init's own next-steps text always tells the user to run `deka dev`,
+// and that command is correct as-is -- `deka` from this package is scoped
+// to the project, so the copy installed into node_modules/.bin (and picked
+// up via the project's package.json script) works with nothing beyond what
+// the install step above already put on disk. We suppress deka's block
+// (stripDekaNextSteps) only because it doesn't know it's being invoked
+// from the parent directory here, so it can't tell the user they still
+// need to `cd <dirName>` first -- not because its command is wrong. Our
+// own block adds that missing `cd` and repeats `deka dev` verbatim,
+// regardless of which package manager ran the install. (This reverts an
+// earlier version of this function that substituted a package-manager
+// idiom -- `npm run dev` / `pnpm dev` / etc. -- for `deka dev`, on the
+// mistaken premise that a bare `deka dev` can't be run without a global
+// install.)
+function printNextSteps(log, dirName) {
   log('')
   log('  Next steps:')
   log(`    cd ${dirName}`)
-  log(`    ${pm.runScript('dev')}`)
+  log('    deka dev')
 }
 
 export const RUNTIME_PACKAGE = '@dekaruntime/deka'
@@ -229,7 +234,7 @@ export function createApp({
 
   if (init.stdout) log(stripDekaNextSteps(init.stdout))
   if (init.stderr) log(stripDekaNextSteps(init.stderr))
-  printNextSteps(log, dirName, pm)
+  printNextSteps(log, dirName)
 
   return 0
 }

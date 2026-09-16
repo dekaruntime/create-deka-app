@@ -162,9 +162,9 @@ test('final output tells the user to cd into the project and gives a runnable de
   const output = logs.join('\n')
 
   // This is the bug: the user was left in the parent directory with no
-  // `cd` instruction, and a `deka dev` suggestion that isn't on PATH.
+  // `cd` instruction.
   assert.match(output, /cd myapp\b/, 'output must name the project directory in a cd line')
-  assert.match(output, /npm run dev/, 'output must give a command runnable via the package manager')
+  assert.match(output, /^\s*deka dev\s*$/m, 'output must give the canonical `deka dev` command')
 })
 
 test('a `cd <dir>` line that disappears from the final output fails this suite', () => {
