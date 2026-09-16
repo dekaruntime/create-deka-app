@@ -162,23 +162,19 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
   )
 
   // The bug this suite guards against: the user is left in the parent
-  // directory with no indication they must `cd` into the new project, and
-  // told to run a bare `deka` command that isn't on their PATH. The final
-  // output must name the project directory in a `cd` line and give a
-  // command that runs via the package manager (works with nothing beyond
-  // what install already put in node_modules/.bin) -- and deka's own
-  // suggestion (a bare "deka serve") must not appear at all, since two
-  // competing next-steps blocks would be worse than one wrong one.
+  // directory with no indication they must `cd` into the new project. The
+  // final output must name the project directory in a `cd` line and give
+  // the canonical `deka dev` command -- deka from this package is scoped
+  // to the project, so that command works with nothing beyond what install
+  // already put in node_modules/.bin -- and deka init's own next-steps
+  // suggestion (a bare "deka serve", from this fixture) must not appear at
+  // all, since two competing next-steps blocks would be worse than one.
   assert.match(
     output,
     /cd myapp/,
     'must tell the user to cd into the new project directory -- this is the line the bug report showed missing'
   )
-  assert.match(
-    output,
-    /npm run dev/,
-    'must give a dev command that works via the package manager, not a bare `deka` command'
-  )
+  assert.match(output, /^\s*deka dev\s*$/m, 'must give the canonical `deka dev` command')
   assert.doesNotMatch(
     output,
     /^\s*deka serve\s*$/m,

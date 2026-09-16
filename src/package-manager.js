@@ -8,17 +8,11 @@
 // arm64". `npm_execpath` is a fallback for the rarer case where that header
 // is absent but the package manager's own launcher script is still visible
 // on the path it invoked us with.
-// `runScript` renders the command we tell the user to run for a
-// package.json script (currently always "dev"). It must work with zero
-// global installs, using only what the install step above already put on
-// disk -- so it is each package manager's own idiom for running a local
-// script, never a bare `deka ...` invocation (deka itself only lives in
-// this project's node_modules/.bin).
 const MANAGERS = {
-  npm: { name: 'npm', install: ['npm', ['install']], runScript: (script) => `npm run ${script}` },
-  pnpm: { name: 'pnpm', install: ['pnpm', ['install']], runScript: (script) => `pnpm ${script}` },
-  yarn: { name: 'yarn', install: ['yarn', ['install']], runScript: (script) => `yarn ${script}` },
-  bun: { name: 'bun', install: ['bun', ['install']], runScript: (script) => `bun run ${script}` },
+  npm: { name: 'npm', install: ['npm', ['install']] },
+  pnpm: { name: 'pnpm', install: ['pnpm', ['install']] },
+  yarn: { name: 'yarn', install: ['yarn', ['install']] },
+  bun: { name: 'bun', install: ['bun', ['install']] },
 }
 
 export function detectPackageManager(env = process.env) {
