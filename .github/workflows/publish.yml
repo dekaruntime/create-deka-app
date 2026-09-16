@@ -41,8 +41,18 @@ jobs:
             exit 1
           fi
 
-      - name: Smoke test the CLI
-        run: node index.js
+      # The CLI now requires a directory argument and exits non-zero without one,
+      # so a bare `node index.js` is a failing smoke test. Run the real suite.
+      - name: Test
+        run: npm test
+
+      - name: Usage message without arguments
+        run: |
+          if node index.js > usage.txt 2>&1; then
+            echo "::error::create-deka-app with no arguments should exit non-zero"
+            exit 1
+          fi
+          grep -qi 'usage' usage.txt || { echo "::error::expected a usage message"; cat usage.txt; exit 1; }
 
       # Authenticated by npm trusted publishing (OIDC) on the workflow name,
       # with no stored credential. Provenance is generated automatically for a
