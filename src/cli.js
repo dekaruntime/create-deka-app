@@ -8,10 +8,14 @@ const ownPackageJson = JSON.parse(readFileSync(path.join(__dirname, '..', 'packa
 
 /**
  * Entry point used by both index.js (the real CLI) and the test suite
- * (with argv/env/cwd/log overridden). Returns the process exit code rather
- * than calling process.exit itself, so it stays testable.
+ * (with argv/env/cwd/log overridden). Returns (a promise of) the process
+ * exit code rather than calling process.exit itself, so it stays testable.
+ *
+ * Async because createApp is: its last step (`deka init`) streams its
+ * output as it happens rather than buffering it -- see
+ * runDekaInitStreaming in src/scaffold.js.
  */
-export function run({
+export async function run({
   argv = process.argv.slice(2),
   env = process.env,
   cwd = process.cwd(),
@@ -25,7 +29,7 @@ export function run({
 } = {}) {
   const targetArg = argv[0]
   try {
-    return createApp({ targetArg, cwd, env, log, ownVersion })
+    return await createApp({ targetArg, cwd, env, log, ownVersion })
   } catch (err) {
     if (err instanceof ScaffoldError) {
       error(err.message)

@@ -7,12 +7,14 @@
 // from src/scaffold.js makes this fail (no deka.json, and the
 // order-of-operations log is too short).
 //
-// The stubbed deka binary also mimics the real one's "next steps" output
-// (a `[init] ...` line followed by a bare `deka serve` suggestion, verified
-// against the actual published binary -- see PR description) so this test
-// proves create-deka-app suppresses that and prints its own `cd` + package
-// manager dev command instead, rather than just asserting against the stub
-// in isolation.
+// The stubbed deka binary also mimics the real one's full output shape --
+// its own banner, `[create] ...` progress lines, a `[init] ...` line, then
+// a blank line, "Next steps:", and a bare `deka serve` suggestion,
+// verified against the actual published binary (v0.53.7) -- see PR
+// description) so this test proves create-deka-app suppresses deka's own
+// banner and "Next steps" block and prints its own banner (once) and its
+// own `cd` + package-manager-correct dev command instead, rather than just
+// asserting against the stub in isolation.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -84,10 +86,19 @@ echo "deka $*|$(pwd)" >> "${logFile}"
 if [ "$1" = "init" ]; then
   DIR="$2"
   echo '{"stub":true}' > "$DIR/deka.json"
-  echo "[create] $DIR/deka.json"
-  echo "[init] DekaScript app ready"
-  echo "  cd $DIR"
-  echo "  deka serve"
+  # Mimics deka init's real shape -- verified against the real binary with
+  # stdout/stderr captured separately: everything (its own banner, just the
+  # block-drawing glyphs here, no ANSI -- the filter's banner check doesn't
+  # need them -- the per-file [create] lines, "[init] ... ready", then a
+  # blank line, "Next steps:", and its own bare deka-serve suggestion, wrong
+  # for a project-local install) goes to STDERR; stdout stays empty.
+  echo " ░████████  ░███████  ░██    ░██ ░██████   " >&2
+  echo "[create] $DIR/deka.json" >&2
+  echo "[init] DekaScript app ready" >&2
+  echo "" >&2
+  echo "  Next steps:" >&2
+  echo "  cd $DIR" >&2
+  echo "  deka serve" >&2
 fi
 exit 0
 DEKA_EOF
@@ -118,7 +129,7 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
     encoding: 'utf8',
   })
 
-  assert.match(output, /Using npm to install/)
+  assert.match(output, /Installing the deka runtime with npm/)
 
   const targetDir = path.join(work, 'myapp')
   const pkgJsonPath = path.join(targetDir, 'package.json')
@@ -164,24 +175,39 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
     'deka init must run from the parent directory'
   )
 
-  // The bug this suite guards against: the user is left in the parent
-  // directory with no indication they must `cd` into the new project. The
-  // final output must name the project directory in a `cd` line and give
-  // the canonical `deka dev` command -- deka from this package is scoped
-  // to the project, so that command works with nothing beyond what install
-  // already put in node_modules/.bin -- and deka init's own next-steps
-  // suggestion (a bare "deka serve", from this fixture) must not appear at
-  // all, since two competing next-steps blocks would be worse than one.
+  // deka#1103: the actual bug. `deka` is never on PATH for a project-local
+  // install (only node_modules/.bin/deka exists), so telling the user to
+  // run a bare `deka dev` produced "command not found". The final output
+  // must name the project directory in a `cd` line and give a command npm
+  // can actually run (`npm run dev`, its own `dev` script) -- and deka
+  // init's own next-steps suggestion (a bare "deka serve", from this
+  // fixture) must not appear at all, since two competing next-steps blocks
+  // would be worse than one.
   assert.match(
     output,
     /cd myapp/,
     'must tell the user to cd into the new project directory -- this is the line the bug report showed missing'
   )
-  assert.match(output, /^\s*deka dev\s*$/m, 'must give the canonical `deka dev` command')
+  assert.match(output, /^\s*npm run dev\b/m, 'must give a command npm can actually run')
+  assert.match(output, /npx deka dev/, 'must also mention the direct npx form as an alternative')
   assert.doesNotMatch(
     output,
     /^\s*deka serve\s*$/m,
     "deka init's own bare-command suggestion must be suppressed, not printed alongside create-deka-app's own"
+  )
+
+  // create-deka-app prints its own banner, once, up front -- deka init's
+  // own copy (this fixture deliberately echoes the exact same
+  // " ░████████  ░███████  ░██    ░██ ░██████   " line that create-deka-app's
+  // real banner also contains, at its own middle row) must be suppressed,
+  // so that exact line appears only as many times as create-deka-app's own
+  // banner naturally contains it -- once -- not twice.
+  const sharedBannerRow = ' ░████████  ░███████  ░██    ░██ ░██████   '
+  const occurrences = output.split('\n').filter((line) => line === sharedBannerRow).length
+  assert.equal(
+    occurrences,
+    1,
+    `expected deka init's own banner row to be suppressed (create-deka-app's own banner contains the same row once); got ${occurrences} occurrences in:\n${output}`
   )
 
   rmSync(work, { recursive: true, force: true })
