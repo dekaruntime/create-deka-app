@@ -15,6 +15,7 @@
 // in isolation.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
@@ -144,10 +145,20 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
     'the runtime version must be resolved from the registry before package.json is written'
   )
   assert.match(log[1], /^npm install\|saw-package-json=yes\|/, 'package.json must be written before install runs')
+  // macOS resolves /var -> /private/var, so the child reports a realpath'd cwd
+  // while `work` is the unresolved mkdtemp path. Compare both realpath'd, or
+  // this fails on every macOS run and passes only on Linux CI (it did: 0.0.5
+  // shipped with this red).
+  const [initCmd, initCwd] = log[2].split('|')
   assert.equal(
-    log[2],
-    `deka init myapp|${work}`,
-    'deka init must run after install, invoked with the directory name as an argument, from the parent directory'
+    initCmd,
+    'deka init myapp',
+    'deka init must run after install, invoked with the directory name as an argument'
+  )
+  assert.equal(
+    fs.realpathSync(initCwd),
+    fs.realpathSync(work),
+    'deka init must run from the parent directory'
   )
 
   // The bug this suite guards against: the user is left in the parent
