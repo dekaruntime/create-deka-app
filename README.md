@@ -32,6 +32,23 @@ everything non-interactively — no prompts:
 See [deka#1091](https://github.com/dekaruntime/deka/issues/1091) for the
 design history.
 
+## Versioning
+
+**create-deka-app's version always equals the deka runtime version it
+scaffolds.** `create-deka-app@0.53.4` pins `@dekaruntime/deka@0.53.4` — not
+some other version, and never its own separate `0.0.x` release line. The
+two publish together, from the same CI run (`.github/workflows/publish-runtime.yml`,
+the `deka` family), so a given create-deka-app version always produces the
+same project: no registry lookup needed to decide the pin.
+
+The one exception is a create-deka-app release whose exact-matching
+runtime build isn't published yet (or a scaffolder-only release cut via
+`publish.yml`'s `v*` tag path, which has no runtime counterpart at all).
+If installing the exact pin fails, create-deka-app falls back to the
+latest published `@dekaruntime/deka` version, prints a clear warning, and
+never leaves a nonexistent version pinned in the generated
+`package.json`.
+
 ## Platforms
 
 | Platform | Status |

@@ -1,4 +1,5 @@
-# Publishes the 8 deka/dsc runtime packages under npm/ to npm.
+# Publishes the 8 deka/dsc runtime packages under npm/ to npm (plus
+# create-deka-app, lockstep-versioned with deka -- see below).
 #
 # Hard constraint (Sami, deka#1091): this repo NEVER compiles Rust and NEVER
 # commits binaries or version bumps. This workflow downloads prebuilt
@@ -10,7 +11,14 @@
 # successful publish.
 #
 # This file owns the deka-v*/dsc-v* tag namespaces. publish.yml (v* ->
-# create-deka-app) is untouched and independent.
+# create-deka-app, for a standalone scaffolder-only release with no
+# matching runtime version) is untouched and independent.
+#
+# create-deka-app versioning is in lockstep with deka (never dsc): a
+# `deka` family run also stamps and publishes create-deka-app at the same
+# version, as the 9th package in this run's all-or-nothing boundary --
+# published after the deka launcher, read back, and promoted to `latest`
+# alongside the other eight. A `dsc` family run never touches it.
 name: publish-runtime
 
 on:
@@ -189,6 +197,15 @@ jobs:
           fi
           echo "@dekaruntime/dsc@${DSC_VERSION} is published; deka@${{ steps.version.outputs.version }} can depend on it."
 
+      # create-deka-app is versioned in lockstep with deka (never dsc, see
+      # the file header): this run also stamps and publishes it at the same
+      # VERSION. Run its test suite before touching anything, so a failing
+      # test blocks the publish instead of shipping a broken scaffolder at
+      # the runtime's version number.
+      - name: Test create-deka-app
+        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
+        run: npm test
+
       # ------------------------------------------------------------------
       # 3. Download into npm/<pkg>/bin/, verify every sha256, chmod +x, and
       #    smoke-test the runner-native binary. Fails closed: any checksum
@@ -236,10 +253,15 @@ jobs:
 
           if [ "$FAMILY" = "deka" ]; then
             jq --arg d "$DSC_VERSION" '.dependencies["@dekaruntime/dsc"] = $d' "$launcher" > "$launcher.tmp" && mv "$launcher.tmp" "$launcher"
+
+            # Lockstep versioning: create-deka-app@VERSION pins
+            # @dekaruntime/deka@VERSION directly (see src/scaffold.js) --
+            # stamping its version here is what makes that true.
+            jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
           fi
 
           echo "Stamped $FAMILY packages at $VERSION (working tree only; nothing committed):"
-          git diff --stat -- npm/ || true
+          git diff --stat -- npm/ package.json || true
 
       # ------------------------------------------------------------------
       # 6. Publish: platform packages first, launcher last. Trusted
@@ -268,8 +290,17 @@ jobs:
           set -euo pipefail
           (cd "npm/${FAMILY}" && npm publish --access public --tag next)
 
+      # create-deka-app publishes last, after the deka launcher -- lockstep
+      # versioning (see the file header), deka family only. It lives at the
+      # repo root, not under npm/, so this runs from the checkout root.
+      - name: Publish create-deka-app
+        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
+        run: |
+          set -euo pipefail
+          npm publish --access public --tag next
+
       # ------------------------------------------------------------------
-      # 7. Read back: fail the run if any of the four packages this run
+      # 7. Read back: fail the run if any of the packages this run
       #    published did not actually land on the registry.
       # ------------------------------------------------------------------
       # A successful `npm publish` can still take several minutes to
@@ -278,6 +309,10 @@ jobs:
       # reported failure. 40 x 15s (~10 minutes) per package, with a log
       # line per attempt so slow propagation is visible instead of a
       # silent wait.
+      # `NAMES` is this run's full all-or-nothing set: the four
+      # @dekaruntime/<family>* packages, plus create-deka-app itself for a
+      # deka family run (lockstep versioning, unscoped name -- it is not
+      # under the @dekaruntime scope).
       - name: Read back from the registry
         if: steps.check.outputs.skip != 'true'
         env:
@@ -285,8 +320,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
-            NAME="@dekaruntime/${pkg}"
+          NAMES="@dekaruntime/${FAMILY}-darwin-arm64 @dekaruntime/${FAMILY}-darwin-x64 @dekaruntime/${FAMILY}-linux-x64 @dekaruntime/${FAMILY}"
+          if [ "$FAMILY" = "deka" ]; then
+            NAMES="$NAMES create-deka-app"
+          fi
+          for NAME in $NAMES; do
             OK=false
             for i in $(seq 1 40); do
               PUBLISHED="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
@@ -305,9 +343,10 @@ jobs:
           done
 
       # ------------------------------------------------------------------
-      # 7b. All four are verified on the registry: promote them to `latest`
-      #     together. This is the all-or-nothing boundary -- until this step
-      #     runs, `npm install @dekaruntime/<pkg>` still resolves the previous
+      # 7b. Everything above is verified on the registry: promote it all to
+      #     `latest` together. This is the all-or-nothing boundary -- until
+      #     this step runs, `npm install @dekaruntime/<pkg>` (and, for a
+      #     deka run, `npm create deka-app`) still resolves the previous
       #     release. npm has no multi-package transaction, so this is the
       #     closest thing to atomic that exists.
       # ------------------------------------------------------------------
@@ -318,13 +357,15 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
-            NAME="@dekaruntime/${pkg}"
+          NAMES="@dekaruntime/${FAMILY}-darwin-arm64 @dekaruntime/${FAMILY}-darwin-x64 @dekaruntime/${FAMILY}-linux-x64 @dekaruntime/${FAMILY}"
+          if [ "$FAMILY" = "deka" ]; then
+            NAMES="$NAMES create-deka-app"
+          fi
+          for NAME in $NAMES; do
             npm dist-tag add "${NAME}@${VERSION}" latest
             echo "${NAME}@${VERSION} is now latest"
           done
-          for pkg in "${FAMILY}-darwin-arm64" "${FAMILY}-darwin-x64" "${FAMILY}-linux-x64" "${FAMILY}"; do
-            NAME="@dekaruntime/${pkg}"
+          for NAME in $NAMES; do
             ACTUAL="$(npm view "${NAME}" dist-tags.latest 2>/dev/null || true)"
             if [ "$ACTUAL" != "$VERSION" ]; then
               echo "::error::${NAME} latest is ${ACTUAL}, expected ${VERSION}"

@@ -70,12 +70,10 @@ export const RUNTIME_PACKAGE = '@dekaruntime/deka'
 // project. Exported so the test suite can assert on it directly without
 // re-deriving the shape.
 //
-// `runtimeVersion` must be the @dekaruntime/deka version resolved at
-// scaffold time (see resolveRuntimeVersion below) -- never this package's
-// own version. create-deka-app has its own 0.0.x release line and
-// @dekaruntime/deka tracks deka's releases; the two are not in lockstep
-// and never will be, so passing this package's own version here pins a
-// version of the runtime that may not exist (see deka#1076-era bug).
+// `runtimeVersion` is whatever create-deka-app decided to pin -- under
+// lockstep versioning (see createApp below) that is this scaffolder's own
+// version in the common case, or the registry-resolved fallback version
+// when the exact match hasn't been published.
 export function buildPackageJson(dirName, runtimeVersion) {
   return {
     name: sanitizePackageName(dirName),
@@ -93,8 +91,12 @@ export function buildPackageJson(dirName, runtimeVersion) {
 }
 
 // Looks up the latest published @dekaruntime/deka version from the npm
-// registry so the generated package.json pins something that actually
-// exists, rather than assuming it matches create-deka-app's own version.
+// registry. This is the FALLBACK path only -- under lockstep versioning,
+// create-deka-app@X.Y.Z always scaffolds @dekaruntime/deka@X.Y.Z directly
+// (see resolveRuntimeVersion below), with no registry call. This function
+// is reached only when that exact pin failed to install, e.g. a
+// create-deka-app release that published before its matching runtime
+// build finished.
 //
 // Always shells out to `npm` for this lookup (not the detected package
 // manager) -- npm ships with every Node.js install, so it is available
@@ -105,7 +107,7 @@ export function buildPackageJson(dirName, runtimeVersion) {
 // Falls back to the "latest" dist-tag -- never to a version we already
 // know is wrong -- if the registry can't be reached (offline, registry
 // outage, etc), and says so via `log` so the fallback is visible.
-export function resolveRuntimeVersion({ spawn = spawnSync, cwd = process.cwd(), log = console.log } = {}) {
+export function resolveLatestRuntimeVersion({ spawn = spawnSync, cwd = process.cwd(), log = console.log } = {}) {
   const result = spawn('npm', ['view', RUNTIME_PACKAGE, 'version'], { cwd, encoding: 'utf8' })
 
   const version =
@@ -120,6 +122,23 @@ export function resolveRuntimeVersion({ spawn = spawnSync, cwd = process.cwd(), 
   }
 
   return version
+}
+
+// Decides which @dekaruntime/deka version to pin in the scaffolded
+// project. `ownVersion` is create-deka-app's own version -- under
+// lockstep versioning (README: "create-deka-app's version always equals
+// the deka runtime version it scaffolds") that IS the runtime version, so
+// this returns it directly with no network call: a given create-deka-app
+// version always produces the same pin, reproducibly.
+//
+// This is exported only so the test suite can call it directly; createApp
+// below is what actually decides whether the pin needs the fallback (that
+// requires attempting the install, which this function does not do).
+export function resolveRuntimeVersion({ ownVersion }) {
+  if (!ownVersion) {
+    throw new Error('resolveRuntimeVersion requires ownVersion')
+  }
+  return ownVersion
 }
 
 /**
@@ -139,9 +158,14 @@ export function createApp({
   arch = process.arch,
   spawn = spawnSync,
   log = console.log,
+  ownVersion,
 } = {}) {
   if (!targetArg) {
     throw new ScaffoldError(USAGE, 1)
+  }
+
+  if (!ownVersion) {
+    throw new Error('createApp requires ownVersion (create-deka-app pins it as the runtime version)')
   }
 
   if (!isSupportedPlatform(platform, arch)) {
@@ -169,16 +193,33 @@ export function createApp({
     mkdirSync(targetDir, { recursive: true })
   }
 
-  const runtimeVersion = resolveRuntimeVersion({ spawn, cwd: targetDir, log })
+  // Lockstep versioning: create-deka-app@X.Y.Z always pins
+  // @dekaruntime/deka@X.Y.Z -- this is create-deka-app's own version, so
+  // deciding the pin needs no network call and is fully reproducible (a
+  // given create-deka-app version always produces the same project).
+  //
+  // The one case this doesn't cover is a create-deka-app release whose
+  // exact-matching runtime build isn't published yet (or never will be --
+  // e.g. a scaffolder-only patch released via publish.yml, see its header
+  // comment). That surfaces as the install below failing, and is handled
+  // as a fallback: re-resolve against the registry and retry once, never
+  // silently leaving a nonexistent version pinned in the final
+  // package.json (the ETARGET bug fixed in 0.0.3).
+  let runtimeVersion = resolveRuntimeVersion({ ownVersion })
 
-  const pkg = buildPackageJson(path.basename(targetDir), runtimeVersion)
-  writeFileSync(path.join(targetDir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+  const writePackageJson = (version) => {
+    const pkg = buildPackageJson(path.basename(targetDir), version)
+    writeFileSync(path.join(targetDir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+  }
+  writePackageJson(runtimeVersion)
 
   const pm = detectPackageManager(env)
   log(`> Using ${pm.name} to install @dekaruntime/deka...`)
 
   const [installCmd, installArgs] = pm.install
-  const install = spawn(installCmd, installArgs, { cwd: targetDir, stdio: 'inherit' })
+  const runInstall = () => spawn(installCmd, installArgs, { cwd: targetDir, stdio: 'inherit' })
+
+  let install = runInstall()
 
   if (install.error) {
     throw new ScaffoldError(
@@ -186,12 +227,41 @@ export function createApp({
         `Make sure ${pm.name} is installed and on your PATH, then run it there yourself.`
     )
   }
+
   if (install.status !== 0) {
-    throw new ScaffoldError(
-      `"${pm.name} install" failed in ${targetDir} (exit code ${install.status}).\n` +
-        'Run it there yourself to see the full error.',
-      install.status ?? 1
+    log(
+      `> "${pm.name} install" could not install ${RUNTIME_PACKAGE}@${runtimeVersion} (exit code ${install.status}). ` +
+        `This can happen when create-deka-app@${ownVersion} shipped before its matching runtime build did. ` +
+        'Falling back to the latest published version instead.'
     )
+    const fallbackVersion = resolveLatestRuntimeVersion({ spawn, cwd: targetDir, log })
+    if (fallbackVersion === runtimeVersion) {
+      throw new ScaffoldError(
+        `"${pm.name} install" failed in ${targetDir} (exit code ${install.status}), ` +
+          `and the npm registry also reports ${RUNTIME_PACKAGE}@${fallbackVersion} as the latest version.\n` +
+          'Run it there yourself to see the full error.',
+        install.status ?? 1
+      )
+    }
+
+    runtimeVersion = fallbackVersion
+    writePackageJson(runtimeVersion)
+    install = runInstall()
+
+    if (install.error) {
+      throw new ScaffoldError(
+        `Could not run "${pm.name} install" in ${targetDir}: ${install.error.message}\n` +
+          `Make sure ${pm.name} is installed and on your PATH, then run it there yourself.`
+      )
+    }
+    if (install.status !== 0) {
+      throw new ScaffoldError(
+        `"${pm.name} install" failed in ${targetDir} (exit code ${install.status}), ` +
+          `even after falling back to ${RUNTIME_PACKAGE}@${runtimeVersion}.\n` +
+          'Run it there yourself to see the full error.',
+        install.status ?? 1
+      )
+    }
   }
 
   const dekaBin = dekaBinPath(targetDir, platform)
