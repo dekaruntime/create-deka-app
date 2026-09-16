@@ -1,9 +1,12 @@
 // Proves every new package.json in npm/ is a publishable manifest with a
-// correct "files" glob, by actually running `npm publish --dry-run`
-// against the real registry (no credentials needed for a dry run against a
-// not-yet-published scoped name). --tag next sidesteps the "must specify a
-// tag for a prerelease version" guard that the 0.0.0-dev placeholder
-// version would otherwise trip.
+// correct "files" glob. Uses `npm pack --dry-run --json`, which builds the
+// tarball locally and never talks to the registry -- unlike `npm publish
+// --dry-run`, which npm refuses to run against a scoped package name
+// without being logged in (confirmed the hard way: this suite's CI run has
+// no npm credentials by design, matching the zero-token posture the real
+// publish-runtime.yml workflow uses). `npm publish --dry-run --tag next`
+// was verified by hand locally (see the PR description) and produces the
+// same file listing; `pack` is the form that can run unauthenticated here.
 //
 // Platform packages ship "files": ["bin/"], and that directory is
 // git-ignored (CI downloads into it) -- so this test writes fixture
@@ -23,30 +26,28 @@ const LAUNCHERS = ['deka', 'dsc']
 const DEKA_PLATFORM_PACKAGES = ['deka-darwin-arm64', 'deka-darwin-x64', 'deka-linux-x64']
 const DSC_PLATFORM_PACKAGES = ['dsc-darwin-arm64', 'dsc-darwin-x64', 'dsc-linux-x64']
 
-function dryRunPublish(pkgDir, pkgName) {
-  // --json is what makes the packed file list reliable to assert on: the
-  // human-readable "npm notice" tarball listing is written inconsistently
-  // depending on TTY detection, but the JSON report always carries `files`.
-  const output = execFileSync('npm', ['publish', '--dry-run', '--access', 'public', '--tag', 'next', '--json'], {
+function packDryRun(pkgDir, pkgName) {
+  const output = execFileSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: pkgDir,
     encoding: 'utf8',
   })
-  const report = JSON.parse(output)[pkgName]
-  assert.ok(report, `npm publish --dry-run --json produced no report for ${pkgName}`)
+  const [report] = JSON.parse(output)
+  assert.ok(report, `npm pack --dry-run --json produced no report for ${pkgDir}`)
+  assert.equal(report.name, pkgName)
   return report.files.map((f) => f.path)
 }
 
 for (const name of LAUNCHERS) {
-  test(`npm publish --dry-run succeeds for @dekaruntime/${name} (launcher)`, () => {
+  test(`npm pack --dry-run succeeds for @dekaruntime/${name} (launcher)`, () => {
     const pkgDir = path.join(NPM_ROOT, name)
-    const files = dryRunPublish(pkgDir, `@dekaruntime/${name}`)
+    const files = packDryRun(pkgDir, `@dekaruntime/${name}`)
     assert.ok(files.includes('bin.js'), `expected bin.js in ${files}`)
     assert.ok(files.includes('launcher-core.js'), `expected launcher-core.js in ${files}`)
   })
 }
 
 for (const name of DEKA_PLATFORM_PACKAGES) {
-  test(`npm publish --dry-run succeeds for @dekaruntime/${name} (ships deka + dsc siblings)`, (t) => {
+  test(`npm pack --dry-run succeeds for @dekaruntime/${name} (ships deka + dsc siblings)`, (t) => {
     const pkgDir = path.join(NPM_ROOT, name)
     const binDir = path.join(pkgDir, 'bin')
     fs.mkdirSync(binDir, { recursive: true })
@@ -56,14 +57,14 @@ for (const name of DEKA_PLATFORM_PACKAGES) {
     fs.chmodSync(path.join(binDir, 'dsc'), 0o755)
     t.after(() => fs.rmSync(binDir, { recursive: true, force: true }))
 
-    const files = dryRunPublish(pkgDir, `@dekaruntime/${name}`)
+    const files = packDryRun(pkgDir, `@dekaruntime/${name}`)
     assert.ok(files.includes('bin/deka'), `expected bin/deka in ${files}`)
     assert.ok(files.includes('bin/dsc'), `expected bin/dsc in ${files}`)
   })
 }
 
 for (const name of DSC_PLATFORM_PACKAGES) {
-  test(`npm publish --dry-run succeeds for @dekaruntime/${name}`, (t) => {
+  test(`npm pack --dry-run succeeds for @dekaruntime/${name}`, (t) => {
     const pkgDir = path.join(NPM_ROOT, name)
     const binDir = path.join(pkgDir, 'bin')
     fs.mkdirSync(binDir, { recursive: true })
@@ -71,7 +72,7 @@ for (const name of DSC_PLATFORM_PACKAGES) {
     fs.chmodSync(path.join(binDir, 'dsc'), 0o755)
     t.after(() => fs.rmSync(binDir, { recursive: true, force: true }))
 
-    const files = dryRunPublish(pkgDir, `@dekaruntime/${name}`)
+    const files = packDryRun(pkgDir, `@dekaruntime/${name}`)
     assert.ok(files.includes('bin/dsc'), `expected bin/dsc in ${files}`)
   })
 }
