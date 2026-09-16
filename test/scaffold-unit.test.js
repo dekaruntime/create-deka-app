@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, exist
 import { createInterface } from 'node:readline'
 import os from 'node:os'
 import path from 'node:path'
-import { createApp, ScaffoldError, USAGE, resolveRuntimeVersion, resolveLatestRuntimeVersion, RUNTIME_PACKAGE } from '../src/scaffold.js'
+import { createApp, ScaffoldError, USAGE, resolveRuntimeVersion, resolveLatestRuntimeVersion, RUNTIME_PACKAGE, printNextSteps, colorCommands } from '../src/scaffold.js'
 import { createInitOutputFilter } from '../src/init-output-filter.js'
 import { run } from '../src/cli.js'
 
@@ -232,8 +232,10 @@ test('final output tells the user to cd into the project and gives a runnable, p
   // with no `cd` instruction, and told to run a bare `deka dev` that isn't
   // on PATH for a project-local install.
   assert.match(output, /cd myapp\b/, 'output must name the project directory in a cd line')
-  assert.match(output, /^\s*npm run dev\b/m, 'npm projects must be told to run `npm run dev`, not a bare `deka dev`')
-  assert.match(output, /npx deka dev/, 'must also mention the direct npx form as an alternative')
+  assert.match(output, /npm run dev\b/, 'npm projects must be told to run `npm run dev`, not a bare `deka dev`')
+  assert.doesNotMatch(output, /# or:|npx deka dev/, 'no alternative form -- one command per step')
+  assert.match(output, /^\s*1\. .*cd myapp/m, 'step 1 is numbered and is the cd')
+  assert.match(output, /^\s*2\. .*npm run dev/m, 'step 2 is numbered and is the dev command')
 })
 
 test('a `cd <dir>` line that disappears from the final output fails this suite', async () => {
@@ -255,8 +257,8 @@ test('a `cd <dir>` line that disappears from the final output fails this suite',
     runDekaInit: makeRunDekaInitStub({ initOutput: REAL_DEKA_INIT_OUTPUT }),
   })
   assert.ok(
-    logs.some((line) => /^\s*cd myapp\s*$/.test(line)),
-    `expected a standalone "cd myapp" line in the output; got:\n${logs.join('\n')}`
+    logs.some((line) => /^\s*1\. (\u001b\[32m)?cd myapp(\u001b\[0m)?\s*$/.test(line)),
+    `expected a standalone "1. cd myapp" line in the output; got:\n${logs.join('\n')}`
   )
 })
 
@@ -641,17 +643,17 @@ test('a canary create-deka-app whose exact pin fails to install falls back to th
 
 // deka#1103: the actual bug -- `deka` is never on PATH for a project-local
 // install, so the "Next steps" must give a command each package manager
-// can actually run (its own `dev` script) rather than a bare `deka dev`,
-// with the direct node_modules/.bin form mentioned as an alternative.
+// can actually run (its own `dev` script) rather than a bare `deka dev`.
+// Two numbered steps, one command each, no alternatives.
 const NEXT_STEPS_BY_PM = [
-  { userAgent: 'npm/10.2.4 node/v20.11.0 linux x64', run: 'npm run dev', direct: 'npx deka dev' },
-  { userAgent: 'pnpm/8.15.1 npm/? node/v20.11.0 linux x64', run: 'pnpm dev', direct: 'pnpm exec deka dev' },
-  { userAgent: 'yarn/1.22.19 npm/? node/v20.11.0 linux x64', run: 'yarn dev', direct: 'yarn deka dev' },
-  { userAgent: 'bun/1.1.0 npm/? node/v20.11.0 linux x64', run: 'bun dev', direct: 'bunx deka dev' },
+  { userAgent: 'npm/10.2.4 node/v20.11.0 linux x64', run: 'npm run dev' },
+  { userAgent: 'pnpm/8.15.1 npm/? node/v20.11.0 linux x64', run: 'pnpm dev' },
+  { userAgent: 'yarn/1.22.19 npm/? node/v20.11.0 linux x64', run: 'yarn dev' },
+  { userAgent: 'bun/1.1.0 npm/? node/v20.11.0 linux x64', run: 'bun dev' },
 ]
 
-for (const { userAgent, run: runCmd, direct } of NEXT_STEPS_BY_PM) {
-  test(`next steps for ${userAgent.split('/')[0]}: "${runCmd}" with "${direct}" as the direct alternative`, async () => {
+for (const { userAgent, run: runCmd } of NEXT_STEPS_BY_PM) {
+  test(`next steps for ${userAgent.split('/')[0]}: "2. ${runCmd}" and nothing else`, async () => {
     const cwd = tmp('cda-nextsteps-pm-')
     const logs = []
 
@@ -673,8 +675,12 @@ for (const { userAgent, run: runCmd, direct } of NEXT_STEPS_BY_PM) {
       `expected a line with "${runCmd}"; got:\n${output}`
     )
     assert.ok(
-      logs.some((line) => line.includes(direct)),
-      `expected the direct alternative "${direct}" to be mentioned; got:\n${output}`
+      logs.some((line) => /^\s*2\. /.test(line) && line.includes(runCmd)),
+      `expected "2. ${runCmd}" as the second step; got:\n${output}`
+    )
+    assert.ok(
+      !logs.some((line) => /# or:|deka dev/.test(line)),
+      `no alternative command and no bare deka dev; got:\n${output}`
     )
     rmSync(cwd, { recursive: true, force: true })
   })
@@ -712,4 +718,18 @@ test('the deka banner is printed once, as the very first output, before the inst
   const bannerLogCalls = logs.filter((line) => /[░█]/.test(line))
   assert.equal(bannerLogCalls.length, 1, `expected exactly one log() call with banner glyphs; got:\n${logs.join('\n')}`)
   rmSync(cwd, { recursive: true, force: true })
+})
+
+test('next steps: commands are green only on a TTY without NO_COLOR', () => {
+  const lines = []
+  printNextSteps((l) => lines.push(l), 'myapp', { name: 'npm' }, true)
+  assert.match(lines[2], /^    1\. \u001b\[32mcd myapp\u001b\[0m$/)
+  assert.match(lines[3], /^    2\. \u001b\[32mnpm run dev\u001b\[0m$/)
+  const plain = []
+  printNextSteps((l) => plain.push(l), 'myapp', { name: 'npm' }, false)
+  assert.equal(plain[2], '    1. cd myapp')
+  assert.equal(plain[3], '    2. npm run dev')
+  assert.equal(colorCommands({ NO_COLOR: '1' }, true), false)
+  assert.equal(colorCommands({}, false), false)
+  assert.equal(colorCommands({}, true), true)
 })

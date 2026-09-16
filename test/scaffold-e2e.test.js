@@ -188,8 +188,8 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
     /cd myapp/,
     'must tell the user to cd into the new project directory -- this is the line the bug report showed missing'
   )
-  assert.match(output, /^\s*npm run dev\b/m, 'must give a command npm can actually run')
-  assert.match(output, /npx deka dev/, 'must also mention the direct npx form as an alternative')
+  assert.match(output, /^\s*2\. npm run dev\b/m, 'must give a command npm can actually run, as numbered step 2')
+  assert.doesNotMatch(output, /# or:/, 'no alternative form')
   assert.doesNotMatch(
     output,
     /^\s*deka serve\s*$/m,
