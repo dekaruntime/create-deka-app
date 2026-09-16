@@ -41,13 +41,17 @@ two publish together, from the same CI run (`.github/workflows/publish-runtime.y
 the `deka` family), so a given create-deka-app version always produces the
 same project: no registry lookup needed to decide the pin.
 
-The one exception is a create-deka-app release whose exact-matching
-runtime build isn't published yet (or a scaffolder-only release cut via
-`publish.yml`'s `v*` tag path, which has no runtime counterpart at all).
-If installing the exact pin fails, create-deka-app falls back to the
-latest published `@dekaruntime/deka` version, prints a clear warning, and
-never leaves a nonexistent version pinned in the generated
-`package.json`.
+There is one publish path for this whole repo: create-deka-app has no
+standalone release of its own. The version in this repo's own
+`package.json` is a `0.0.0` placeholder — it is never bumped by hand or
+committed as part of a release; the workflow stamps the real version into
+it at publish time, in the working tree only.
+
+The one exception to the lockstep pin is a create-deka-app release whose
+exact-matching runtime build isn't published yet. If installing the exact
+pin fails, create-deka-app falls back to the latest published
+`@dekaruntime/deka` version, prints a clear warning, and never leaves a
+nonexistent version pinned in the generated `package.json`.
 
 ## Platforms
 

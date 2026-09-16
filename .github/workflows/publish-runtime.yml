@@ -1,8 +1,15 @@
-# Publishes the 8 deka/dsc runtime packages under npm/ to npm (plus
-# create-deka-app, lockstep-versioned with deka -- see below).
+# Single workflow for this repo: job `test` is this repo's CI, running on
+# every trigger below; job `publish` publishes the 8 deka/dsc runtime
+# packages under npm/ (plus create-deka-app, lockstep-versioned with deka --
+# see below) to npm, gated to only the events that actually mean "publish".
+#
+# The filename is fixed: npm trusted publishing for every @dekaruntime/*
+# package here is configured against the workflow named
+# `publish-runtime.yml` specifically -- renaming this file breaks OIDC
+# trust for all 8 packages. Do not rename it.
 #
 # Hard constraint (Sami, deka#1091): this repo NEVER compiles Rust and NEVER
-# commits binaries or version bumps. This workflow downloads prebuilt
+# commits binaries or version bumps. The publish job downloads prebuilt
 # binaries from the deka/dsc release hosts into npm/*/bin/ (git-ignored) in
 # a single ubuntu-latest job, verifies every sha256 against the release
 # manifest, stamps versions into package.json IN THE WORKING TREE ONLY,
@@ -10,19 +17,35 @@
 # git-committed or git-pushed here except a lightweight tag after a
 # successful publish.
 #
-# This file owns the deka-v*/dsc-v* tag namespaces. publish.yml (v* ->
-# create-deka-app, for a standalone scaffolder-only release with no
-# matching runtime version) is untouched and independent.
+# This file owns the deka-v*/dsc-v* tag namespaces. There is one publish
+# path for this whole repo: create-deka-app has no standalone `v*`-tag
+# release of its own, and no version is ever committed here -- the root
+# package.json in git carries a "0.0.0" placeholder that only ever becomes
+# real inside a publish job run, in the working tree, never pushed back.
 #
-# create-deka-app versioning is in lockstep with deka (never dsc): a
-# `deka` family run also stamps and publishes create-deka-app at the same
-# version, as the 9th package in this run's all-or-nothing boundary --
-# published after the deka launcher, read back, and promoted to `latest`
-# alongside the other eight. A `dsc` family run never touches it.
+# create-deka-app versioning is in lockstep with deka (never dsc): a `deka`
+# family publish run also stamps and publishes create-deka-app at the same
+# version, as the 9th package in this run -- published after the deka
+# launcher and read back like the other eight. A `dsc` family run never
+# touches it. `test`
+# below runs create-deka-app's own suite on every trigger and gates
+# `publish` via `needs: test`, so a failing test blocks the publish instead
+# of shipping a broken scaffolder at the runtime's version number.
+#
+# Resumable: a publish run that dies partway through (e.g. create-deka-app's
+# publish step failing after the other 8 packages already reached `latest`)
+# must not be skipped forever by the next run. The "already published"
+# check below only skips when EVERY package in this run's set is already at
+# `latest` == VERSION, and every publish step below tolerates its own
+# package already sitting at the exact VERSION on the registry (npm's
+# "cannot publish over the previously published versions" refusal) by
+# treating that as "already done" instead of failing the job.
 name: publish-runtime
 
 on:
+  pull_request:
   push:
+    branches: [main]
     tags:
       - 'deka-v*'
       - 'dsc-v*'
@@ -51,7 +74,47 @@ on:
     - cron: '17 * * * *'
 
 jobs:
+  # This repo's CI: runs the test suite (plus the npm toolchain the publish
+  # job actually ships) on every trigger above -- pull requests, every push,
+  # and every publish-triggering event too, so `publish` can gate on it via
+  # `needs: test` below instead of a separate in-job test step.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The publish job below runs `npm install -g npm@latest`; this must
+      # test the same npm or it gates a different toolchain than the one
+      # that ships.
+      - name: Use the same npm the publish job uses
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Usage message without arguments
+        run: |
+          if node index.js > usage.txt 2>&1; then
+            echo "::error::create-deka-app with no arguments should exit non-zero"
+            exit 1
+          fi
+          grep -qi 'usage' usage.txt || { echo "::error::expected a usage message"; cat usage.txt; exit 1; }
+
   publish:
+    needs: test
+    # Only the events that actually mean "publish": a deka-v*/dsc-v* tag
+    # push, repository_dispatch, schedule (the hourly fallback check), or a
+    # manual workflow_dispatch. Never a pull_request, and never a plain push
+    # to main (branches: [main] above exists only so `test` runs there too).
+    if: github.event_name != 'pull_request' && github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -131,9 +194,16 @@ jobs:
           echo "Publishing $FAMILY@$VERSION"
 
       # ------------------------------------------------------------------
-      # 2. Idempotency: exit 0 if npm already has this version. Makes a
-      #    re-run (or a future daily fallback schedule) safe to run
-      #    unconditionally.
+      # 2. Idempotency: exit 0 if this run's ENTIRE package set is already
+      #    fully published (every one of them at dist-tags.latest ==
+      #    VERSION). Checking only the launcher package here was the bug:
+      #    a half-completed run -- say, create-deka-app's publish step
+      #    failing after all 8 runtime packages already reached `latest`
+      #    -- left @dekaruntime/${FAMILY} at VERSION, so this step kept
+      #    reporting skip=true forever and create-deka-app never got
+      #    another chance to publish. Skip only when EVERY package in the
+      #    set is done; otherwise resume the run (individual publish steps
+      #    below no-op for whichever packages already made it).
       # ------------------------------------------------------------------
       - name: Check whether this version is already published
         id: check
@@ -142,9 +212,22 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          PUBLISHED="$(npm view "@dekaruntime/${FAMILY}@${VERSION}" version 2>/dev/null || true)"
-          if [ "$PUBLISHED" = "$VERSION" ]; then
-            echo "@dekaruntime/${FAMILY}@${VERSION} is already published; nothing to do."
+          NAMES="@dekaruntime/${FAMILY}-darwin-arm64 @dekaruntime/${FAMILY}-darwin-x64 @dekaruntime/${FAMILY}-linux-x64 @dekaruntime/${FAMILY}"
+          if [ "$FAMILY" = "deka" ]; then
+            NAMES="$NAMES create-deka-app"
+          fi
+          ALL_DONE=true
+          for NAME in $NAMES; do
+            LATEST="$(npm view "${NAME}" dist-tags.latest 2>/dev/null || true)"
+            if [ "$LATEST" = "$VERSION" ]; then
+              echo "${NAME}@${VERSION} is already latest on npm."
+            else
+              echo "${NAME} is not yet at ${VERSION} latest (currently: ${LATEST:-<none>})."
+              ALL_DONE=false
+            fi
+          done
+          if [ "$ALL_DONE" = "true" ]; then
+            echo "Every package in this run's set is already published and promoted; nothing to do."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -166,7 +249,7 @@ jobs:
           npm --version
 
       # ------------------------------------------------------------------
-      # 4. deka's bundled dsc must be the version deka pins, and that dsc
+      # 3. deka's bundled dsc must be the version deka pins, and that dsc
       #    version must already be on npm (publish dsc first otherwise).
       # ------------------------------------------------------------------
       - name: Resolve deka's pinned dsc version
@@ -197,17 +280,8 @@ jobs:
           fi
           echo "@dekaruntime/dsc@${DSC_VERSION} is published; deka@${{ steps.version.outputs.version }} can depend on it."
 
-      # create-deka-app is versioned in lockstep with deka (never dsc, see
-      # the file header): this run also stamps and publishes it at the same
-      # VERSION. Run its test suite before touching anything, so a failing
-      # test blocks the publish instead of shipping a broken scaffolder at
-      # the runtime's version number.
-      - name: Test create-deka-app
-        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
-        run: npm test
-
       # ------------------------------------------------------------------
-      # 3. Download into npm/<pkg>/bin/, verify every sha256, chmod +x, and
+      # 4. Download into npm/<pkg>/bin/, verify every sha256, chmod +x, and
       #    smoke-test the runner-native binary. Fails closed: any checksum
       #    mismatch or missing manifest entry throws (scripts/lib/verify.js).
       # ------------------------------------------------------------------
@@ -273,31 +347,63 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          # Published under `next`, not `latest`. Nothing an `npm install`
-          # resolves moves until every package in this release is verified,
-          # so a mid-run failure is invisible to consumers.
+          # Published straight to `latest`. The OIDC credential that trusted
+          # publishing mints is good for `npm publish` ONLY -- it cannot run
+          # `npm dist-tag add` (E401), so a publish-to-`next`-then-promote
+          # scheme is impossible without a stored token. The publish ORDER
+          # is the safety instead: platform packages first, the launcher
+          # (which pins them at this exact version) after they are read
+          # back, and create-deka-app last. A mid-run failure leaves the
+          # previous launcher as `latest`, still installable.
+          #
+          # Resumable: a prior run of this job can have already published
+          # some of these packages before failing later on (e.g. on
+          # create-deka-app below). `npm publish` refuses to publish over a
+          # version that already exists (E403 EPUBLISHCONFLICT), so check
+          # first and skip instead of letting that refusal fail the job.
           for platform in darwin-arm64 darwin-x64 linux-x64; do
-            (cd "npm/${FAMILY}-${platform}" && npm publish --access public --tag next)
+            NAME="@dekaruntime/${FAMILY}-${platform}"
+            ON_REGISTRY="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
+            if [ "$ON_REGISTRY" = "$VERSION" ]; then
+              echo "${NAME}@${VERSION} already on registry, skipping publish"
+            else
+              (cd "npm/${FAMILY}-${platform}" && npm publish --access public)
+            fi
           done
 
       - name: Publish the launcher
         if: steps.check.outputs.skip != 'true'
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          (cd "npm/${FAMILY}" && npm publish --access public --tag next)
+          NAME="@dekaruntime/${FAMILY}"
+          ON_REGISTRY="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
+          if [ "$ON_REGISTRY" = "$VERSION" ]; then
+            echo "${NAME}@${VERSION} already on registry, skipping publish"
+          else
+            (cd "npm/${FAMILY}" && npm publish --access public)
+          fi
 
       # create-deka-app publishes last, after the deka launcher -- lockstep
       # versioning (see the file header), deka family only. It lives at the
       # repo root, not under npm/, so this runs from the checkout root.
       - name: Publish create-deka-app
         if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          npm publish --access public --tag next
+          ON_REGISTRY="$(npm view "create-deka-app@${VERSION}" version 2>/dev/null || true)"
+          if [ "$ON_REGISTRY" = "$VERSION" ]; then
+            echo "create-deka-app@${VERSION} already on registry, skipping publish"
+          else
+            npm publish --access public
+          fi
 
       # ------------------------------------------------------------------
       # 7. Read back: fail the run if any of the packages this run
@@ -309,7 +415,7 @@ jobs:
       # reported failure. 40 x 15s (~10 minutes) per package, with a log
       # line per attempt so slow propagation is visible instead of a
       # silent wait.
-      # `NAMES` is this run's full all-or-nothing set: the four
+      # `NAMES` is this run's full set: the four
       # @dekaruntime/<family>* packages, plus create-deka-app itself for a
       # deka family run (lockstep versioning, unscoped name -- it is not
       # under the @dekaruntime scope).
@@ -343,14 +449,11 @@ jobs:
           done
 
       # ------------------------------------------------------------------
-      # 7b. Everything above is verified on the registry: promote it all to
-      #     `latest` together. This is the all-or-nothing boundary -- until
-      #     this step runs, `npm install @dekaruntime/<pkg>` (and, for a
-      #     deka run, `npm create deka-app`) still resolves the previous
-      #     release. npm has no multi-package transaction, so this is the
-      #     closest thing to atomic that exists.
+      # 7b. `latest` must now point at VERSION for every package this run
+      #     owns. Read-only (`npm view`), so it needs no credential; it is
+      #     what the resumable check at the top keys on next time.
       # ------------------------------------------------------------------
-      - name: Promote to latest
+      - name: Verify latest
         if: steps.check.outputs.skip != 'true'
         env:
           FAMILY: ${{ steps.trigger.outputs.family }}
@@ -362,15 +465,12 @@ jobs:
             NAMES="$NAMES create-deka-app"
           fi
           for NAME in $NAMES; do
-            npm dist-tag add "${NAME}@${VERSION}" latest
-            echo "${NAME}@${VERSION} is now latest"
-          done
-          for NAME in $NAMES; do
             ACTUAL="$(npm view "${NAME}" dist-tags.latest 2>/dev/null || true)"
             if [ "$ACTUAL" != "$VERSION" ]; then
-              echo "::error::${NAME} latest is ${ACTUAL}, expected ${VERSION}"
+              echo "::error::${NAME} latest is ${ACTUAL:-<none>}, expected ${VERSION}"
               exit 1
             fi
+            echo "${NAME} latest = ${VERSION}"
           done
 
       # ------------------------------------------------------------------
