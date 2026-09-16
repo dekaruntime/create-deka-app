@@ -15,15 +15,22 @@ yarn create deka-app myapp
 bun create deka-app myapp
 ```
 
-## Status
+## What it does
 
-**Placeholder.** This package reserves the name while the real scaffolder is built ([deka#1091](https://github.com/dekaruntime/deka/issues/1091)). It does not scaffold a project yet; it points you at deka.
+`npx create-deka-app myapp` takes the directory as an argument and does
+everything non-interactively — no prompts:
 
-Install deka directly in the meantime:
+1. creates `myapp/` (refuses if it already exists and is non-empty)
+2. writes `myapp/package.json`, pinning `@dekaruntime/deka` as a
+   devDependency at this package's own version, with `dev`/`build`/`start`
+   scripts that call `deka`
+3. runs your package manager's install (detected automatically: npm, pnpm,
+   yarn or bun)
+4. runs `deka init` from the freshly installed binary — the real
+   scaffolder, which never overwrites a file that's already there
 
-```sh
-curl -fsSL https://deka.gg/install.sh | sh
-```
+See [deka#1091](https://github.com/dekaruntime/deka/issues/1091) for the
+design history.
 
 ## Platforms
 
