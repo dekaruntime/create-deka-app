@@ -376,6 +376,10 @@ jobs:
       #    "-canary-<sha>" suffix) -- VERSION is simply the full version
       #    string, canary suffix included; nothing here needs CHANNEL.
       # ------------------------------------------------------------------
+      - name: Install native Linux loader dependencies
+        if: steps.check.outputs.skip != 'true' && steps.trigger.outputs.family == 'deka'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-0
+
       - name: Download and verify binaries
         if: steps.check.outputs.skip != 'true'
         env:

@@ -41,7 +41,7 @@ export function smokeTestVersion(binaryPath, expectedVersion) {
   const result = spawnSync(binaryPath, ['--version'], { encoding: 'utf8' })
   if (result.error) throw result.error
   if (result.status !== 0) {
-    throw new Error(`${binaryPath} --version exited ${result.status}`)
+    throw new Error(`${binaryPath} --version exited ${result.status}: ${(result.stderr ?? "").trim()}`)
   }
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
   if (!output.includes(expectedVersion)) {
