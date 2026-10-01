@@ -130,7 +130,8 @@ export function buildPackageJson(dirName, runtimeVersion) {
     scripts: {
       dev: 'deka dev',
       build: 'deka build',
-      start: 'deka start',
+      start: 'deka run',
+      test: 'deka test',
     },
     devDependencies: {
       [RUNTIME_PACKAGE]: runtimeVersion,

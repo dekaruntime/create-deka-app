@@ -128,6 +128,8 @@ test('sync(): a stable manifest is unaffected -- base version equals the request
 
   const dekaManifest = {
     family: 'deka',
+    runtime: 'deka_vm',
+    cli_abi: 1,
     version,
     channel: 'stable',
     binaries: Object.fromEntries(
@@ -157,12 +159,10 @@ test('sync(): a stable manifest is unaffected -- base version equals the request
   const root = freshRoot('sync-stable')
   t.after(() => rmSync(root, { recursive: true, force: true }))
 
-  const summary = await sync({ family: 'deka', version, dscVersion, root })
+  const summary = await sync({ family: 'deka', version, root })
 
-  assert.equal(summary.smokeTests.length, 2)
-  const [dekaSmoke, dscSmoke] = summary.smokeTests
+  assert.equal(summary.smokeTests.length, 1)
+  const [dekaSmoke] = summary.smokeTests
   assert.equal(dekaSmoke.baseVersion, version)
   assert.match(dekaSmoke.output, /0\.59\.0/)
-  assert.equal(dscSmoke.baseVersion, dscVersion)
-  assert.match(dscSmoke.output, /0\.58\.0/)
 })

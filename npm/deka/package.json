@@ -1,18 +1,14 @@
 {
   "name": "@dekaruntime/deka",
   "version": "0.0.0-dev",
-  "description": "deka runtime launcher. Resolves and execs the platform binary installed via optionalDependencies; ships both the deka and dsc commands.",
+  "description": "Native DekaScript compiler, Rust VM and desktop runtime launcher.",
   "bin": {
-    "deka": "bin.js",
-    "dsc": "bin.js"
+    "deka": "bin.js"
   },
   "files": [
     "bin.js",
     "launcher-core.js"
   ],
-  "dependencies": {
-    "@dekaruntime/dsc": "0.0.0-dev"
-  },
   "optionalDependencies": {
     "@dekaruntime/deka-darwin-arm64": "0.0.0-dev",
     "@dekaruntime/deka-darwin-x64": "0.0.0-dev",
