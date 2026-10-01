@@ -380,7 +380,7 @@ test('generated package.json pins exactly create-deka-app\'s own version when it
     !calls.some(([cmd, args]) => cmd === 'npm' && args[0] === 'view'),
     'the happy path must not query the registry at all'
   )
-  assert.deepEqual(pkg.scripts, { dev: 'deka dev', build: 'deka build', start: 'deka start' })
+  assert.deepEqual(pkg.scripts, { dev: 'deka dev', build: 'deka build', start: 'deka run', test: 'deka test' })
   rmSync(cwd, { recursive: true, force: true })
 })
 

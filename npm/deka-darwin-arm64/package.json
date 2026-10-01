@@ -1,7 +1,7 @@
 {
   "name": "@dekaruntime/deka-darwin-arm64",
   "version": "0.0.0-dev",
-  "description": "deka prebuilt binary for darwin-arm64. Ships both the deka and dsc binaries as siblings (deka's runtime dsc lookup is sibling-only). Downloaded from the deka release by CI and never built in this repo.",
+  "description": "Native DekaScript compiler, Rust VM and window host for darwin-arm64. Downloaded and checksum verified from R2.",
   "os": [
     "darwin"
   ],
@@ -9,7 +9,7 @@
     "arm64"
   ],
   "files": [
-    "bin/"
+    "bin/deka"
   ],
   "repository": {
     "type": "git",

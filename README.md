@@ -24,7 +24,7 @@ everything non-interactively — no prompts:
 
 1. creates `myapp/` (refuses if it already exists and is non-empty)
 2. writes `myapp/package.json`, pinning `@dekaruntime/deka` as a
-   devDependency at this package's own version, with `dev`/`build`/`start`
+   devDependency at this package's own version, with `dev`/`build`/`start`/`test`
    scripts that call `deka`
 3. runs your package manager's install (detected automatically: npm, pnpm,
    yarn or bun)
@@ -84,7 +84,7 @@ create-deka-app pins the *matching* canary `@dekaruntime/deka`, never a
 stable one.
 
 A canary's binaries report their **base version** on `deka --version` /
-`dsc --version` — `0.59.0`, never `0.59.0-canary-d5661ed`. Promotion
+the source manifest — `0.59.0`, never `0.59.0-canary-d5661ed`. Promotion
 republishes the exact same compiled bytes under the plain stable tag, so
 the binary itself never learns it was ever a canary; only the git tag, the
 R2 path and the npm version string say so.
@@ -104,3 +104,29 @@ Unsupported platforms get a clear message, never a half-installed project.
 ## License
 
 Apache-2.0, matching deka and dsc.
+
+## Native runtime delivery
+
+Native releases distribute only `deka`, containing the local compiler, Rust VM
+and desktop window host. `@dekaruntime/deka` has no standalone DSC dependency,
+and platform tarballs contain only `bin/deka`. Historical `@dekaruntime/dsc`
+packages remain for their existing users; the hourly release watcher follows
+Deka's native stable/canary channels only.
+
+Created apps use `npm run dev`, `npm test`, `npm run build`, and `npm start`.
+Build produces a single executable at `dist/deka-app`. Source reload restarts
+state; invalid edits keep the last working view. The current native language
+subset is documented in the runtime repository; legacy JS/Node APIs are not
+implied by this package.
+
+The fixed `publish-runtime.yml` trusted-publishing identity is unchanged.
+Before publishing it verifies every downloaded checksum, then packs and
+fresh-installs the actual native executable through a local npm registry,
+executes the public scaffolder and npm commands, and runs a compiled app after
+removing its source. This repository never compiles Rust.
+
+Reproduce that complete check with a locally built Deka executable:
+
+```sh
+node scripts/test-native-install.mjs /absolute/path/to/deka .tmp/native-install 0.60.1
+```

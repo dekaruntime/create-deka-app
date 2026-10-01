@@ -108,6 +108,9 @@ export async function resolveManifest(family, version, fetchImpl = fetch) {
   return {
     family,
     version,
+    runtime: manifest.runtime,
+    cli_abi: manifest.cli_abi,
+    dsc_version: manifest.dsc_version,
     channel: typeof manifest.channel === 'string' ? manifest.channel : versionChannel(version),
     base_version: typeof manifest.base_version === 'string' ? manifest.base_version : undefined,
     binaries,

@@ -139,7 +139,7 @@ test('end-to-end: create-deka-app myapp scaffolds via npm and runs deka init in 
   const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'))
   assert.equal(pkg.name, 'myapp')
   assert.equal(pkg.private, true)
-  assert.deepEqual(pkg.scripts, { dev: 'deka dev', build: 'deka build', start: 'deka start' })
+  assert.deepEqual(pkg.scripts, { dev: 'deka dev', build: 'deka build', start: 'deka run', test: 'deka test' })
   assert.equal(
     pkg.devDependencies['@dekaruntime/deka'],
     ownVersion,

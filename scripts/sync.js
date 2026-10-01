@@ -27,15 +27,11 @@ export function parseArgs(argv) {
     const a = argv[i]
     if (a === '--family') args.family = argv[++i]
     else if (a === '--version') args.version = argv[++i]
-    else if (a === '--dsc-version') args.dscVersion = argv[++i]
     else if (a === '--root') args.root = argv[++i]
     else throw new Error(`unknown argument: ${a}`)
   }
   if (!args.family) throw new Error('--family is required')
   if (!args.version) throw new Error('--version is required')
-  if (args.family === 'deka' && !args.dscVersion) {
-    throw new Error('--dsc-version is required for --family deka (deka pins it in scripts/dsc-version)')
-  }
   return args
 }
 
@@ -56,8 +52,10 @@ export function smokeTestVersion(binaryPath, expectedVersion) {
 
 export async function sync(args) {
   const familyManifest = await resolveManifest(args.family, args.version)
-  const dscManifest = args.family === 'deka' ? await resolveManifest('dsc', args.dscVersion) : null
 
+  if (args.family === 'deka' && (familyManifest.runtime !== 'deka_vm' || familyManifest.cli_abi !== 1 || familyManifest.dsc_version)) {
+    throw new Error('Deka release must use the native VM contract (runtime deka_vm, cli_abi 1, no DSC pin)')
+  }
   const downloaded = []
 
   for (const platform of PLATFORMS) {
@@ -69,13 +67,7 @@ export async function sync(args) {
     fs.chmodSync(destPath, 0o755)
     downloaded.push({ platform, binary: args.family, path: destPath, sha256: entry.sha256 })
 
-    if (dscManifest) {
-      const dscEntry = dscManifest.binaries[platform]
-      const dscDestPath = path.join(destDir, 'dsc')
-      await downloadAndVerify(dscEntry.url, dscEntry.sha256, dscDestPath)
-      fs.chmodSync(dscDestPath, 0o755)
-      downloaded.push({ platform, binary: 'dsc', path: dscDestPath, sha256: dscEntry.sha256 })
-    }
+
   }
 
   // rfd#68: a canary's binary prints the BASE version on --version, never
@@ -87,7 +79,6 @@ export async function sync(args) {
   // stripping the suffix -- see src/channel.js). For a stable version this
   // is a no-op: base_version == version.
   const familyBaseVersion = baseVersionOf(args.version, familyManifest)
-  const dscBaseVersion = dscManifest ? baseVersionOf(args.dscVersion, dscManifest) : null
 
   const smokeTests = []
   const nativeFamilyBinary = path.join(args.root, 'npm', `${args.family}-${RUNNER_NATIVE_PLATFORM}`, 'bin', args.family)
@@ -98,17 +89,8 @@ export async function sync(args) {
     output: smokeTestVersion(nativeFamilyBinary, familyBaseVersion),
   })
 
-  if (dscManifest) {
-    const nativeDscBinary = path.join(args.root, 'npm', `${args.family}-${RUNNER_NATIVE_PLATFORM}`, 'bin', 'dsc')
-    smokeTests.push({
-      binary: nativeDscBinary,
-      version: args.dscVersion,
-      baseVersion: dscBaseVersion,
-      output: smokeTestVersion(nativeDscBinary, dscBaseVersion),
-    })
-  }
 
-  return { family: args.family, version: args.version, dscVersion: args.dscVersion, downloaded, smokeTests }
+  return { family: args.family, version: args.version, downloaded, smokeTests }
 }
 
 // ESM equivalent of CommonJS's `require.main === module`: true only when

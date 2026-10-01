@@ -64,19 +64,19 @@ for (const name of LAUNCHERS) {
 }
 
 for (const name of DEKA_PLATFORM_PACKAGES) {
-  test(`npm pack --dry-run succeeds for @dekaruntime/${name} (ships deka + dsc siblings)`, (t) => {
+  test(`npm pack --dry-run succeeds for @dekaruntime/${name} (ships native deka only)`, (t) => {
     const pkgDir = path.join(NPM_ROOT, name)
     const binDir = path.join(pkgDir, 'bin')
     fs.mkdirSync(binDir, { recursive: true })
     fs.writeFileSync(path.join(binDir, 'deka'), 'fixture')
-    fs.writeFileSync(path.join(binDir, 'dsc'), 'fixture')
+    // An old staged compiler must never leak into the new native package.
+    fs.writeFileSync(path.join(binDir, 'dsc'), 'stale compiler')
     fs.chmodSync(path.join(binDir, 'deka'), 0o755)
-    fs.chmodSync(path.join(binDir, 'dsc'), 0o755)
     t.after(() => fs.rmSync(binDir, { recursive: true, force: true }))
 
     const files = packDryRun(pkgDir, `@dekaruntime/${name}`)
     assert.ok(files.includes('bin/deka'), `expected bin/deka in ${files}`)
-    assert.ok(files.includes('bin/dsc'), `expected bin/dsc in ${files}`)
+    assert.ok(!files.includes('bin/dsc'), `unexpected standalone compiler in ${files}`)
   })
 }
 
