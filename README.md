@@ -130,3 +130,5 @@ Reproduce that complete check with a locally built Deka executable:
 ```sh
 node scripts/test-native-install.mjs /absolute/path/to/deka .tmp/native-install 0.60.1
 ```
+
+Linux desktop binaries require the system `libxkbcommon-x11` library. On Ubuntu/Debian, install `libxkbcommon-x11-0`; graphical desktop installations commonly already include it.
